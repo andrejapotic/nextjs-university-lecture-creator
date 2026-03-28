@@ -1,6 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import Section from './Section';
 
@@ -17,12 +24,18 @@ type PanelProps = {
   minTextboxHeight: number;
   layout: LayoutOption;
   selectedSection: number;
+  subtitle: string;
   textboxes: TextboxItem[];
+  title: string;
   onLayoutChange: (layout: LayoutOption) => void;
   onSectionSelect: (section: number) => void;
+  onSubtitleChange: (subtitle: string) => void;
   onTextboxChange: (id: number, text: string) => void;
   onDeleteTextbox: (id: number) => void;
   onTextboxHeightsChange: (heights: Record<number, number>) => void;
+  onTitleChange: (title: string) => void;
+  onAvailableHeightChange: (height: number) => void;
+  onSectionUsageChange: (usage: Record<number, number>) => void;
   onMoveTextbox: (
     draggedId: number,
     targetSection: number,
@@ -49,17 +62,25 @@ export default function Panel({
   minTextboxHeight,
   layout,
   selectedSection,
+  subtitle,
   textboxes,
+  title,
   onLayoutChange,
   onSectionSelect,
+  onSubtitleChange,
   onTextboxChange,
   onDeleteTextbox,
   onTextboxHeightsChange,
+  onTitleChange,
+  onAvailableHeightChange,
+  onSectionUsageChange,
   onMoveTextbox,
   onOverflow,
 }: PanelProps) {
   const textboxRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
   const wrapperRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const lastValidTextboxValuesRef = useRef<Record<number, string>>({});
   const closeMenuTimeoutRef = useRef<number | null>(null);
   const [draggedTextboxId, setDraggedTextboxId] = useState<number | null>(null);
   const [dropTarget, setDropTarget] = useState<
@@ -90,6 +111,26 @@ export default function Panel({
     [hoveredTextboxId, textboxes]
   );
 
+  const measureTextboxHeight = useCallback(
+    (element: HTMLTextAreaElement) => {
+      element.style.height = '0px';
+
+      const computedStyles = window.getComputedStyle(element);
+      const borderHeight =
+        Number.parseFloat(computedStyles.borderTopWidth) +
+        Number.parseFloat(computedStyles.borderBottomWidth);
+      const nextHeight = Math.max(
+        element.scrollHeight + borderHeight,
+        minTextboxHeight
+      );
+      element.style.height = `${nextHeight}px`;
+      element.style.overflowY = 'hidden';
+
+      return element.offsetHeight;
+    },
+    [minTextboxHeight]
+  );
+
   const measureHeights = useCallback(
     () =>
       textboxes.reduce<Record<number, number>>((accumulator, textbox) => {
@@ -100,19 +141,104 @@ export default function Panel({
           return accumulator;
         }
 
-        element.style.height = '0px';
-        const nextHeight = Math.max(element.scrollHeight, minTextboxHeight);
-        element.style.height = `${nextHeight}px`;
-        element.style.overflowY = 'hidden';
-        accumulator[textbox.id] = nextHeight;
+        accumulator[textbox.id] = measureTextboxHeight(element);
         return accumulator;
       }, {}),
-    [minTextboxHeight, textboxes]
+    [measureTextboxHeight, minTextboxHeight, textboxes]
   );
 
+  const measureSectionUsage = useCallback(() => {
+    const usageBySection = Array.from({ length: sectionCount }, (_, sectionIndex) => {
+      const section = sectionRefs.current[sectionIndex];
+
+      if (!section) {
+        return 0;
+      }
+
+      const sectionRect = section.getBoundingClientRect();
+
+      return textboxes.reduce((maxBottom, textbox) => {
+        if (textbox.section !== sectionIndex) {
+          return maxBottom;
+        }
+
+        const wrapper = wrapperRefs.current[textbox.id];
+
+        if (!wrapper) {
+          return maxBottom;
+        }
+
+        const wrapperRect = wrapper.getBoundingClientRect();
+        return Math.max(maxBottom, wrapperRect.bottom - sectionRect.top);
+      }, 0);
+    });
+
+    return usageBySection.reduce<Record<number, number>>(
+      (accumulator, usage, sectionIndex) => {
+        accumulator[sectionIndex] = Math.ceil(usage);
+        return accumulator;
+      },
+      {}
+    );
+  }, [sectionCount, textboxes]);
+
+  const getAvailableHeight = useCallback(
+    (sectionIndex: number) =>
+      sectionRefs.current[sectionIndex]?.clientHeight ??
+      sectionRefs.current[0]?.clientHeight ??
+      panelHeight,
+    [panelHeight]
+  );
+
+  useLayoutEffect(() => {
+    const nextHeights = measureHeights();
+
+    lastValidTextboxValuesRef.current = textboxes.reduce<Record<number, string>>(
+      (accumulator, textbox) => {
+        accumulator[textbox.id] = textbox.text;
+        return accumulator;
+      },
+      {}
+    );
+    onTextboxHeightsChange(nextHeights);
+    onSectionUsageChange(measureSectionUsage());
+  }, [
+    layout,
+    measureHeights,
+    measureSectionUsage,
+    onSectionUsageChange,
+    onTextboxHeightsChange,
+    textboxes,
+  ]);
+
   useEffect(() => {
-    onTextboxHeightsChange(measureHeights());
-  }, [measureHeights, onTextboxHeightsChange]);
+    const firstSection = sectionRefs.current[0];
+
+    if (!firstSection) {
+      onAvailableHeightChange(panelHeight);
+      return undefined;
+    }
+
+    const reportAvailableHeight = () => {
+      onAvailableHeightChange(firstSection.clientHeight);
+    };
+
+    reportAvailableHeight();
+
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+
+    const observer = new ResizeObserver(() => {
+      reportAvailableHeight();
+    });
+
+    observer.observe(firstSection);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [layout, onAvailableHeightChange, panelHeight]);
 
   useEffect(() => {
     return () => {
@@ -162,23 +288,26 @@ export default function Panel({
       return;
     }
 
-    const nextHeight = Math.max(element.scrollHeight, minTextboxHeight);
-    const heights = measureHeights();
-    heights[textbox.id] = nextHeight;
+    const previousHeight = element.offsetHeight || minTextboxHeight;
+    const lastValidValue =
+      lastValidTextboxValuesRef.current[textbox.id] ?? textbox.text;
 
-    const totalHeight = textboxes.reduce((sum, currentTextbox) => {
-      if (currentTextbox.section !== textbox.section) {
-        return sum;
-      }
+    measureTextboxHeight(element);
 
-      return sum + (heights[currentTextbox.id] ?? minTextboxHeight);
-    }, 0);
+    const nextSectionUsage = measureSectionUsage();
 
-    if (totalHeight > panelHeight) {
+    if (
+      (nextSectionUsage[textbox.section] ?? 0) >
+      getAvailableHeight(textbox.section)
+    ) {
+      element.value = lastValidValue;
+      measureTextboxHeight(element);
+      element.style.height = `${previousHeight}px`;
       onOverflow();
       return;
     }
 
+    lastValidTextboxValuesRef.current[textbox.id] = nextText;
     onTextboxChange(textbox.id, nextText);
   };
 
@@ -302,63 +431,92 @@ export default function Panel({
         <div className="absolute bottom-full left-0 mb-3">
           <Section layout={layout} onLayoutChange={onLayoutChange} />
         </div>
-        <div className="h-[768px] overflow-hidden border border-gray-300 bg-white">
-          <div className="relative flex h-full">
-          {sections.map((sectionTextboxes, sectionIndex) => (
-            <div
-              key={sectionIndex}
-              onMouseDown={() => onSectionSelect(sectionIndex)}
-              onDragOver={(event) => handleSectionDragOver(event, sectionIndex)}
-              onDrop={(event) => handleSectionDrop(event, sectionIndex)}
-              className={`flex h-full flex-1 flex-col overflow-hidden ${
-                sectionIndex > 0 ? 'border-l border-gray-300' : ''
-              } ${
-                selectedSection === sectionIndex
-                  ? 'bg-blue-50/40 shadow-[inset_0_0_0_2px_rgba(59,130,246,0.35)]'
-                  : 'bg-white'
-              }`}
-            >
-              {sectionTextboxes.map((textbox, index) => (
+        <div
+          className="overflow-hidden border border-gray-300 bg-white"
+          style={{ height: `${panelHeight}px` }}
+        >
+          <div className="flex h-full flex-col">
+            <div className="h-36 shrink-0 border-b border-gray-300 px-8 py-6">
+              <div className="flex h-full flex-col justify-between">
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(event) => onTitleChange(event.target.value)}
+                  placeholder="Object title"
+                  className="h-12 w-full border-none bg-transparent text-3xl font-semibold text-gray-900 outline-none placeholder:text-gray-400"
+                />
+                <input
+                  type="text"
+                  value={subtitle}
+                  onChange={(event) => onSubtitleChange(event.target.value)}
+                  placeholder="Object subtitle"
+                  className="h-8 w-full border-none bg-transparent text-lg text-gray-500 outline-none placeholder:text-gray-400"
+                />
+              </div>
+            </div>
+            <div className="relative flex flex-1 min-h-0">
+              {sections.map((sectionTextboxes, sectionIndex) => (
                 <div
-                  key={textbox.id}
+                  key={sectionIndex}
                   ref={(element) => {
-                    wrapperRefs.current[textbox.id] = element;
+                    sectionRefs.current[sectionIndex] = element;
                   }}
-                  onDragOver={(event) => handleDragOver(event, textbox)}
-                  onDrop={(event) => handleDrop(event, textbox)}
-                  onMouseEnter={() => handleTextboxMouseEnter(textbox.id)}
-                  onMouseLeave={scheduleMenuClose}
-                  className={`relative ${
-                    dropTarget?.type === 'textbox' &&
-                    dropTarget.id === textbox.id &&
-                    dropTarget.position === 'before'
-                      ? 'border-t-4 border-t-blue-500'
-                      : ''
+                  onMouseDown={() => onSectionSelect(sectionIndex)}
+                  onDragOver={(event) => handleSectionDragOver(event, sectionIndex)}
+                  onDrop={(event) => handleSectionDrop(event, sectionIndex)}
+                  className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden ${
+                    sectionIndex > 0 ? 'border-l border-gray-300' : ''
                   } ${
-                    dropTarget?.type === 'textbox' &&
-                    dropTarget.id === textbox.id &&
-                    dropTarget.position === 'after'
-                      ? 'border-b-4 border-b-blue-500'
-                      : ''
+                    selectedSection === sectionIndex
+                      ? 'bg-blue-50/40 shadow-[inset_0_0_0_2px_rgba(59,130,246,0.35)]'
+                      : 'bg-white'
                   }`}
                 >
-                  <textarea
-                    ref={(element) => {
-                      textboxRefs.current[textbox.id] = element;
-                    }}
-                    value={textbox.text}
-                    onChange={(event) => handleTextboxInput(textbox, event.target.value)}
-                    placeholder={`Textbox ${index + 1}`}
-                    rows={1}
-                    className="w-full resize-none overflow-hidden border border-gray-300 bg-white px-3 py-3 text-base leading-6 text-gray-900 outline-none transition focus:border-blue-500"
-                  />
+                  {sectionTextboxes.map((textbox, index) => (
+                    <div
+                      key={textbox.id}
+                      ref={(element) => {
+                        wrapperRefs.current[textbox.id] = element;
+                      }}
+                      onDragOver={(event) => handleDragOver(event, textbox)}
+                      onDrop={(event) => handleDrop(event, textbox)}
+                      onMouseEnter={() => handleTextboxMouseEnter(textbox.id)}
+                      onMouseLeave={scheduleMenuClose}
+                      className={`relative ${
+                        dropTarget?.type === 'textbox' &&
+                        dropTarget.id === textbox.id &&
+                        dropTarget.position === 'before'
+                          ? 'border-t-4 border-t-blue-500'
+                          : ''
+                      } ${
+                        dropTarget?.type === 'textbox' &&
+                        dropTarget.id === textbox.id &&
+                        dropTarget.position === 'after'
+                          ? 'border-b-4 border-b-blue-500'
+                          : ''
+                      }`}
+                    >
+                      <textarea
+                        ref={(element) => {
+                          textboxRefs.current[textbox.id] = element;
+                        }}
+                        value={textbox.text}
+                        onChange={(event) =>
+                          handleTextboxInput(textbox, event.target.value)
+                        }
+                        placeholder={`Textbox ${index + 1}`}
+                        rows={1}
+                        className="w-full resize-none overflow-hidden border border-gray-300 bg-white px-3 py-3 text-base leading-6 text-gray-900 outline-none transition focus:border-blue-500"
+                      />
+                    </div>
+                  ))}
+                  {dropTarget?.type === 'section' &&
+                  dropTarget.section === sectionIndex ? (
+                    <div className="mt-auto border-b-4 border-b-blue-500" />
+                  ) : null}
                 </div>
               ))}
-              {dropTarget?.type === 'section' && dropTarget.section === sectionIndex ? (
-                <div className="mt-auto border-b-4 border-b-blue-500" />
-              ) : null}
             </div>
-          ))}
           </div>
         </div>
       </div>

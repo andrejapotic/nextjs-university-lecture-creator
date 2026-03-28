@@ -11,13 +11,12 @@ type NavbarProps = {
 
 export default function Navbar({ onAddPanel, onAddTextbox }: NavbarProps) {
   return (
-    <nav className="bg-gray-800 text-white p-4">
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-3">
+    <nav className="bg-gray-800 text-white">
+      <div className="flex items-stretch">
+        <div className="flex w-64 shrink-0 items-center border-r border-white/10 px-4 py-4">
           <AddObject onAdd={onAddPanel} />
         </div>
-        <div className="h-8 w-px bg-gray-600" />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-1 items-center gap-3 px-4 py-4">
           <Textbox onAdd={onAddTextbox} />
           <ImageTool />
           <Latex />
