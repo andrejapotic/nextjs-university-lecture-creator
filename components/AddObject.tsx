@@ -1,15 +1,9 @@
+import ToolbarAction, { ObjectIcon } from './ToolbarAction';
+
 type AddObjectProps = {
   onAdd: () => void;
 };
 
 export default function AddObject({ onAdd }: AddObjectProps) {
-  return (
-    <button
-      type="button"
-      onClick={onAdd}
-      className="rounded bg-slate-100 px-4 py-2 font-semibold text-slate-900 hover:bg-slate-200"
-    >
-      Add Object
-    </button>
-  );
+  return <ToolbarAction label="Add Object" icon={<ObjectIcon />} onClick={onAdd} />;
 }

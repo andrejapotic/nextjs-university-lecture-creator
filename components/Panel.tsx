@@ -427,30 +427,30 @@ export default function Panel({
 
   return (
     <>
-      <div className="relative mx-auto w-[1024px]">
+      <div className="animate-editor-in relative mx-auto w-[1024px]">
         <div className="absolute bottom-full left-0 mb-3">
           <Section layout={layout} onLayoutChange={onLayoutChange} />
         </div>
         <div
-          className="overflow-hidden border border-gray-300 bg-white"
+          className="overflow-hidden rounded-none border border-slate-200/80 bg-white shadow-[0_40px_90px_-58px_rgba(15,23,42,0.35)] transition-shadow duration-300"
           style={{ height: `${panelHeight}px` }}
         >
           <div className="flex h-full flex-col">
-            <div className="h-36 shrink-0 border-b border-gray-300 px-8 py-6">
+            <div className="h-36 shrink-0 border-b border-slate-200/80 px-8 py-6">
               <div className="flex h-full flex-col justify-between">
                 <input
                   type="text"
                   value={title}
                   onChange={(event) => onTitleChange(event.target.value)}
-                  placeholder="Object title"
-                  className="h-12 w-full border-none bg-transparent text-3xl font-semibold text-gray-900 outline-none placeholder:text-gray-400"
+                  placeholder="Section title"
+                  className="h-12 w-full border-none bg-transparent text-3xl font-semibold text-slate-900 outline-none placeholder:text-slate-400"
                 />
                 <input
                   type="text"
                   value={subtitle}
                   onChange={(event) => onSubtitleChange(event.target.value)}
-                  placeholder="Object subtitle"
-                  className="h-8 w-full border-none bg-transparent text-lg text-gray-500 outline-none placeholder:text-gray-400"
+                  placeholder="Section subtitle"
+                  className="h-8 w-full border-none bg-transparent text-lg text-slate-500 outline-none placeholder:text-slate-400"
                 />
               </div>
             </div>
@@ -464,11 +464,11 @@ export default function Panel({
                   onMouseDown={() => onSectionSelect(sectionIndex)}
                   onDragOver={(event) => handleSectionDragOver(event, sectionIndex)}
                   onDrop={(event) => handleSectionDrop(event, sectionIndex)}
-                  className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden ${
-                    sectionIndex > 0 ? 'border-l border-gray-300' : ''
+                  className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden transition-[background-color,box-shadow] duration-200 ease-out ${
+                    sectionIndex > 0 ? 'border-l border-slate-200/80' : ''
                   } ${
                     selectedSection === sectionIndex
-                      ? 'bg-blue-50/40 shadow-[inset_0_0_0_2px_rgba(59,130,246,0.35)]'
+                      ? 'bg-sky-50/45 shadow-[inset_0_0_0_2px_rgba(125,211,252,0.7)]'
                       : 'bg-white'
                   }`}
                 >
@@ -506,7 +506,7 @@ export default function Panel({
                         }
                         placeholder={`Textbox ${index + 1}`}
                         rows={1}
-                        className="w-full resize-none overflow-hidden border border-gray-300 bg-white px-3 py-3 text-base leading-6 text-gray-900 outline-none transition focus:border-blue-500"
+                        className="w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out placeholder:text-slate-400 hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
                       />
                     </div>
                   ))}
@@ -536,13 +536,13 @@ export default function Panel({
               }}
               onMouseLeave={scheduleMenuClose}
             >
-              <div className="flex items-center gap-2 rounded-md border border-gray-300 bg-white px-2 py-2 shadow-md">
+              <div className="animate-surface-in flex items-center gap-2 rounded-xl border border-slate-200/80 bg-white/95 px-2 py-2 shadow-[0_24px_50px_-28px_rgba(15,23,42,0.45)] backdrop-blur-xl">
                 <button
                   type="button"
                   draggable
                   onDragStart={() => handleDragStart(activeHoveredTextboxId)}
                   onDragEnd={handleDragEnd}
-                  className="cursor-grab rounded border border-gray-200 px-2 py-1 text-xs font-medium text-gray-700 active:cursor-grabbing"
+                  className="cursor-grab rounded-lg border border-slate-200/80 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors duration-200 hover:bg-slate-50 active:cursor-grabbing"
                 >
                   Move
                 </button>
@@ -553,7 +553,7 @@ export default function Panel({
                     setHoveredTextboxId(null);
                     setMenuPosition(null);
                   }}
-                  className="rounded border border-red-200 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+                  className="rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors duration-200 hover:bg-red-50"
                   aria-label="Delete textbox"
                 >
                   Trash

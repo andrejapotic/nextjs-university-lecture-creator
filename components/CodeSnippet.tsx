@@ -1,7 +1,5 @@
+import ToolbarAction, { CodeIcon } from './ToolbarAction';
+
 export default function CodeSnippet() {
-  return (
-    <button className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded">
-      CodeSnippet
-    </button>
-  );
+  return <ToolbarAction label="Add Code Snippet" icon={<CodeIcon />} disabled />;
 }

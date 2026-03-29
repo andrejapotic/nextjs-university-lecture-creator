@@ -61,13 +61,13 @@ export default function Section({ layout, onLayoutChange }: SectionProps) {
       <button
         type="button"
         onClick={() => setIsOpen((current) => !current)}
-        className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm hover:bg-gray-50"
+        className="rounded-xl border border-slate-200/80 bg-white/95 px-3 py-2 text-sm font-medium text-slate-700 shadow-[0_14px_30px_-24px_rgba(15,23,42,0.45)] transition-[transform,background-color,border-color,box-shadow] duration-200 ease-out hover:-translate-y-0.5 hover:border-slate-300 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-100"
       >
-        Section
+        Layout
       </button>
       {isOpen ? (
-        <div className="absolute left-0 top-full mt-2 w-56 rounded-md border border-gray-300 bg-white p-2 shadow-lg">
-          <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+        <div className="animate-surface-in absolute left-0 top-full mt-2 w-56 rounded-2xl border border-slate-200/80 bg-white/95 p-2 shadow-[0_24px_50px_-32px_rgba(15,23,42,0.45)] backdrop-blur-xl">
+          <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
             Layout
           </div>
           <div className="flex flex-col gap-1">
@@ -79,14 +79,14 @@ export default function Section({ layout, onLayoutChange }: SectionProps) {
                   onLayoutChange(option.value);
                   setIsOpen(false);
                 }}
-                className={`rounded-md px-3 py-2 text-left transition ${
+                className={`rounded-xl px-3 py-2 text-left transition-[transform,background-color,color] duration-200 ease-out ${
                   layout === option.value
-                    ? 'bg-blue-50 text-blue-700'
-                    : 'text-gray-700 hover:bg-gray-50'
+                    ? 'bg-sky-50 text-sky-700 shadow-[inset_0_0_0_1px_rgba(125,211,252,0.65)]'
+                    : 'text-slate-700 hover:bg-slate-50'
                 }`}
               >
                 <div className="text-sm font-medium">{option.label}</div>
-                <div className="text-xs text-gray-500">{option.description}</div>
+                <div className="text-xs text-slate-500">{option.description}</div>
               </button>
             ))}
           </div>
