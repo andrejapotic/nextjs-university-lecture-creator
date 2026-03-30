@@ -72,6 +72,22 @@ type EditorSelection =
     }
   | null;
 
+type SelectedContentItem =
+  | {
+      id: number;
+      type: PanelContentItem['type'];
+    }
+  | null;
+
+type EditorHistorySnapshot = {
+  nextId: number;
+  nextObjectNumber: number;
+  nextSectionNumber: number;
+  nextSubobjectNumber: number;
+  objects: LearningObjectItem[];
+  selectedNode: EditorSelection;
+};
+
 type SelectionContext =
   | {
       object: LearningObjectItem;
@@ -91,6 +107,8 @@ type SelectionContext =
 
 const PANEL_HEIGHT = 768;
 const PANEL_HEADER_HEIGHT = 144;
+const HISTORY_COALESCE_MS = 700;
+const HISTORY_LIMIT = 100;
 const MIN_LATEX_BLOCK_HEIGHT = 96;
 const MIN_TEXTBOX_HEIGHT = 50;
 const INITIAL_AVAILABLE_PANEL_HEIGHT = PANEL_HEIGHT - PANEL_HEADER_HEIGHT;
@@ -281,19 +299,80 @@ const findSelectionContext = (
   return null;
 };
 
+const serializeHistorySnapshot = (snapshot: EditorHistorySnapshot) =>
+  JSON.stringify(snapshot);
+
+const getNodeSelectionFromChild = (child: LearningObjectChild): EditorSelection =>
+  child.type === 'section'
+    ? {
+        id: child.id,
+        type: 'section',
+      }
+    : {
+        id: child.id,
+        type: 'subobject',
+      };
+
+const getClosestChildSelection = (
+  children: LearningObjectChild[],
+  preferredIndex: number
+): EditorSelection => {
+  if (children.length === 0) {
+    return null;
+  }
+
+  const safeIndex = Math.min(Math.max(preferredIndex, 0), children.length - 1);
+  return getNodeSelectionFromChild(children[safeIndex]);
+};
+
+const getClosestSectionSelection = (
+  sections: LearningSectionItem[],
+  preferredIndex: number
+): EditorSelection => {
+  if (sections.length === 0) {
+    return null;
+  }
+
+  const safeIndex = Math.min(Math.max(preferredIndex, 0), sections.length - 1);
+  return {
+    id: sections[safeIndex].id,
+    type: 'section',
+  };
+};
+
+const getFirstAvailableSelection = (
+  objects: LearningObjectItem[]
+): EditorSelection => {
+  if (objects.length === 0) {
+    return null;
+  }
+
+  return {
+    id: objects[0].id,
+    type: 'object',
+  };
+};
+
+const collectSectionIdsFromChildren = (children: LearningObjectChild[]) =>
+  children.flatMap((child) =>
+    child.type === 'section'
+      ? [child.id]
+      : child.sections.map((section) => section.id)
+  );
+
 export default function Home() {
   const [objects, setObjects] = useState<LearningObjectItem[]>(INITIAL_OBJECTS);
   const [selectedNode, setSelectedNode] = useState<EditorSelection>(INITIAL_SELECTION);
-  const [pendingCodeSnippetSelectionId, setPendingCodeSnippetSelectionId] =
-    useState<number | null>(null);
+  const [pendingSelectedContentItem, setPendingSelectedContentItem] =
+    useState<SelectedContentItem>(null);
   const [notification, setNotification] = useState<string | null>(null);
-  const [pendingLatexSelectionId, setPendingLatexSelectionId] = useState<number | null>(
-    null
-  );
+  const [selectedContentItem, setSelectedContentItem] =
+    useState<SelectedContentItem>(null);
   const [textToolbarState, setTextToolbarState] = useState<TextToolbarState>(
     INITIAL_TEXT_TOOLBAR_STATE
   );
   const objectsRef = useRef(objects);
+  const selectedNodeRef = useRef(selectedNode);
   const imageInsertHandlerRef = useRef<
     ((request: ImageInsertRequest) => Promise<boolean>) | null
   >(null);
@@ -314,6 +393,13 @@ export default function Home() {
   const sectionUsageHeightsRef = useRef<Record<number, number>>({
     0: 0,
   });
+  const historyPastRef = useRef<EditorHistorySnapshot[]>([]);
+  const historyFutureRef = useRef<EditorHistorySnapshot[]>([]);
+  const activeHistoryGroupRef = useRef<{
+    key: string;
+    timeoutId: number;
+  } | null>(null);
+  const isApplyingHistoryRef = useRef(false);
 
   const selectedContext = useMemo(
     () => findSelectionContext(objects, selectedNode),
@@ -331,6 +417,10 @@ export default function Home() {
   }, [objects]);
 
   useEffect(() => {
+    selectedNodeRef.current = selectedNode;
+  }, [selectedNode]);
+
+  useEffect(() => {
     if (!notification) {
       return undefined;
     }
@@ -341,6 +431,13 @@ export default function Home() {
 
     return () => window.clearTimeout(timeoutId);
   }, [notification]);
+
+  useEffect(() => {
+    if (!selectedSection) {
+      setSelectedContentItem(null);
+      setPendingSelectedContentItem(null);
+    }
+  }, [selectedSection]);
 
   const getNextId = useCallback(() => {
     const nextId = nextIdRef.current;
@@ -365,6 +462,226 @@ export default function Home() {
     nextSectionNumberRef.current += 1;
     return `Section ${nextNumber}`;
   }, []);
+
+  const setSelectedNodeState = useCallback((selection: EditorSelection) => {
+    selectedNodeRef.current = selection;
+    setSelectedNode(selection);
+  }, []);
+
+  const createHistorySnapshot = useCallback(
+    (): EditorHistorySnapshot => ({
+      nextId: nextIdRef.current,
+      nextObjectNumber: nextObjectNumberRef.current,
+      nextSectionNumber: nextSectionNumberRef.current,
+      nextSubobjectNumber: nextSubobjectNumberRef.current,
+      objects: objectsRef.current,
+      selectedNode: selectedNodeRef.current,
+    }),
+    []
+  );
+
+  const clearActiveHistoryGroup = useCallback(() => {
+    const activeGroup = activeHistoryGroupRef.current;
+
+    if (!activeGroup) {
+      return;
+    }
+
+    window.clearTimeout(activeGroup.timeoutId);
+    activeHistoryGroupRef.current = null;
+  }, []);
+
+  const pushHistorySnapshot = useCallback(
+    (destination: 'future' | 'past', snapshot: EditorHistorySnapshot) => {
+      const historyStack =
+        destination === 'past' ? historyPastRef.current : historyFutureRef.current;
+      const previousSnapshot = historyStack[historyStack.length - 1];
+
+      if (
+        previousSnapshot &&
+        serializeHistorySnapshot(previousSnapshot) ===
+          serializeHistorySnapshot(snapshot)
+      ) {
+        return;
+      }
+
+      const nextHistoryStack = [...historyStack, snapshot];
+
+      if (destination === 'past') {
+        historyPastRef.current = nextHistoryStack.slice(-HISTORY_LIMIT);
+        return;
+      }
+
+      historyFutureRef.current = nextHistoryStack.slice(-HISTORY_LIMIT);
+    },
+    []
+  );
+
+  const recordHistorySnapshot = useCallback(
+    (groupKey?: string) => {
+      if (isApplyingHistoryRef.current) {
+        return;
+      }
+
+      const snapshot = createHistorySnapshot();
+
+      if (!groupKey) {
+        clearActiveHistoryGroup();
+        pushHistorySnapshot('past', snapshot);
+        historyFutureRef.current = [];
+        return;
+      }
+
+      const activeGroup = activeHistoryGroupRef.current;
+
+      if (!activeGroup || activeGroup.key !== groupKey) {
+        pushHistorySnapshot('past', snapshot);
+      } else {
+        window.clearTimeout(activeGroup.timeoutId);
+      }
+
+      historyFutureRef.current = [];
+      activeHistoryGroupRef.current = {
+        key: groupKey,
+        timeoutId: window.setTimeout(() => {
+          if (activeHistoryGroupRef.current?.key === groupKey) {
+            activeHistoryGroupRef.current = null;
+          }
+        }, HISTORY_COALESCE_MS),
+      };
+    },
+    [clearActiveHistoryGroup, createHistorySnapshot, pushHistorySnapshot]
+  );
+
+  const applyHistorySnapshot = useCallback(
+    (snapshot: EditorHistorySnapshot) => {
+      clearActiveHistoryGroup();
+      isApplyingHistoryRef.current = true;
+      nextIdRef.current = snapshot.nextId;
+      nextObjectNumberRef.current = snapshot.nextObjectNumber;
+      nextSectionNumberRef.current = snapshot.nextSectionNumber;
+      nextSubobjectNumberRef.current = snapshot.nextSubobjectNumber;
+      objectsRef.current = snapshot.objects;
+      selectedNodeRef.current = snapshot.selectedNode;
+      setObjects(snapshot.objects);
+      setSelectedNode(snapshot.selectedNode);
+      setSelectedContentItem(null);
+      setPendingSelectedContentItem(null);
+      setTextToolbarState(INITIAL_TEXT_TOOLBAR_STATE);
+      isApplyingHistoryRef.current = false;
+    },
+    [clearActiveHistoryGroup]
+  );
+
+  const handleUndo = useCallback(() => {
+    clearActiveHistoryGroup();
+    const previousSnapshot = historyPastRef.current[historyPastRef.current.length - 1];
+
+    if (!previousSnapshot) {
+      return;
+    }
+
+    const currentSnapshot = createHistorySnapshot();
+
+    historyPastRef.current = historyPastRef.current.slice(0, -1);
+    pushHistorySnapshot('future', currentSnapshot);
+    applyHistorySnapshot(previousSnapshot);
+  }, [applyHistorySnapshot, clearActiveHistoryGroup, createHistorySnapshot, pushHistorySnapshot]);
+
+  const handleRedo = useCallback(() => {
+    clearActiveHistoryGroup();
+    const nextSnapshot = historyFutureRef.current[historyFutureRef.current.length - 1];
+
+    if (!nextSnapshot) {
+      return;
+    }
+
+    const currentSnapshot = createHistorySnapshot();
+
+    historyFutureRef.current = historyFutureRef.current.slice(0, -1);
+    pushHistorySnapshot('past', currentSnapshot);
+    applyHistorySnapshot(nextSnapshot);
+  }, [applyHistorySnapshot, clearActiveHistoryGroup, createHistorySnapshot, pushHistorySnapshot]);
+
+  const cleanupSectionCaches = useCallback((sectionIds: number[]) => {
+    if (sectionIds.length === 0) {
+      return;
+    }
+
+    const nextTextboxHeights = { ...panelTextboxHeightsRef.current };
+    const nextLatexHeights = { ...panelLatexHeightsRef.current };
+
+    sectionIds.forEach((sectionId) => {
+      delete nextTextboxHeights[sectionId];
+      delete nextLatexHeights[sectionId];
+    });
+
+    panelTextboxHeightsRef.current = nextTextboxHeights;
+    panelLatexHeightsRef.current = nextLatexHeights;
+  }, []);
+
+  const resolveSelectionFallback = useCallback(
+    (candidates: EditorSelection[], nextObjects: LearningObjectItem[]) => {
+      for (const candidate of candidates) {
+        if (candidate && findSelectionContext(nextObjects, candidate)) {
+          return candidate;
+        }
+      }
+
+      return getFirstAvailableSelection(nextObjects);
+    },
+    []
+  );
+
+  const isActiveTextEntryTarget = useCallback((target: EventTarget | null) => {
+    const candidates = [
+      target instanceof HTMLElement ? target : null,
+      document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    ].filter((candidate): candidate is HTMLElement => candidate !== null);
+
+    return candidates.some((candidate) => {
+      if (candidate.isContentEditable) {
+        return true;
+      }
+
+      return Boolean(
+        candidate.closest(
+          'input, textarea, select, math-field, .cm-editor, [contenteditable=""], [contenteditable="true"]'
+        )
+      );
+    });
+  }, []);
+
+  const getContentItemFlowHeight = useCallback(
+    (item: PanelContentItem) => {
+      if (!selectedSection) {
+        return 0;
+      }
+
+      if (item.type === 'textbox') {
+        return (
+          panelTextboxHeightsRef.current[selectedSection.id]?.[item.id] ??
+          MIN_TEXTBOX_HEIGHT
+        );
+      }
+
+      if (item.type === 'latex') {
+        return (
+          panelLatexHeightsRef.current[selectedSection.id]?.[item.id] ??
+          MIN_LATEX_BLOCK_HEIGHT
+        );
+      }
+
+      if (item.type === 'codeSnippet') {
+        return CODE_SNIPPET_BLOCK_HEIGHT;
+      }
+
+      return (
+        selectedSection.images.find((image) => image.id === item.id)?.height ?? 0
+      );
+    },
+    [selectedSection]
+  );
 
   const updateObjects = useCallback(
     (updater: (currentObjects: LearningObjectItem[]) => LearningObjectItem[]) => {
@@ -435,15 +752,16 @@ export default function Home() {
   );
 
   const handleAddObject = useCallback(() => {
+    recordHistorySnapshot();
     const nextObjectId = getNextId();
     const nextObject = createLearningObject(nextObjectId, getNextObjectTitle());
 
     updateObjects((currentObjects) => [...currentObjects, nextObject]);
-    setSelectedNode({
+    setSelectedNodeState({
       id: nextObjectId,
       type: 'object',
     });
-  }, [getNextId, getNextObjectTitle, updateObjects]);
+  }, [getNextId, getNextObjectTitle, recordHistorySnapshot, setSelectedNodeState, updateObjects]);
 
   const handleAddSubobject = useCallback(() => {
     if (!selectedContext) {
@@ -453,6 +771,7 @@ export default function Home() {
       return;
     }
 
+    recordHistorySnapshot();
     const nextSubobjectId = getNextId();
     const nextSubobject = createLearningSubobject(
       nextSubobjectId,
@@ -495,11 +814,18 @@ export default function Home() {
       })
     );
 
-    setSelectedNode({
+    setSelectedNodeState({
       id: nextSubobjectId,
       type: 'subobject',
     });
-  }, [getNextId, getNextSubobjectTitle, selectedContext, updateObjects]);
+  }, [
+    getNextId,
+    getNextSubobjectTitle,
+    recordHistorySnapshot,
+    selectedContext,
+    setSelectedNodeState,
+    updateObjects,
+  ]);
 
   const handleAddSection = useCallback(() => {
     if (!selectedContext) {
@@ -522,6 +848,7 @@ export default function Home() {
       parentId = selectedContext.subobject.id;
     }
 
+    recordHistorySnapshot();
     const nextSectionId = getNextId();
     const nextSection = createLearningSection(
       nextSectionId,
@@ -595,11 +922,18 @@ export default function Home() {
       })
     );
 
-    setSelectedNode({
+    setSelectedNodeState({
       id: nextSectionId,
       type: 'section',
     });
-  }, [getNextId, getNextSectionTitle, selectedContext, updateObjects]);
+  }, [
+    getNextId,
+    getNextSectionTitle,
+    recordHistorySnapshot,
+    selectedContext,
+    setSelectedNodeState,
+    updateObjects,
+  ]);
 
   const handleAddTextbox = useCallback(() => {
     if (!selectedSection) {
@@ -615,6 +949,7 @@ export default function Home() {
       return;
     }
 
+    recordHistorySnapshot();
     const nextTextboxId = getNextId();
 
     updateSection(selectedSection.id, (section) => {
@@ -640,7 +975,11 @@ export default function Home() {
         textboxes: [...section.textboxes, nextTextbox],
       };
     });
-  }, [getNextId, selectedSection, updateSection]);
+    setPendingSelectedContentItem({
+      id: nextTextboxId,
+      type: 'textbox',
+    });
+  }, [getNextId, recordHistorySnapshot, selectedSection, updateSection]);
 
   const handleAddLatex = useCallback(() => {
     if (!selectedSection) {
@@ -656,6 +995,7 @@ export default function Home() {
       return;
     }
 
+    recordHistorySnapshot();
     const nextLatexId = getNextId();
 
     updateSection(selectedSection.id, (section) => {
@@ -681,8 +1021,11 @@ export default function Home() {
         latexItems: [...section.latexItems, nextLatex],
       };
     });
-    setPendingLatexSelectionId(nextLatexId);
-  }, [getNextId, selectedSection, updateSection]);
+    setPendingSelectedContentItem({
+      id: nextLatexId,
+      type: 'latex',
+    });
+  }, [getNextId, recordHistorySnapshot, selectedSection, updateSection]);
 
   const handleAddCodeSnippet = useCallback(() => {
     if (!selectedSection) {
@@ -698,6 +1041,7 @@ export default function Home() {
       return;
     }
 
+    recordHistorySnapshot();
     const nextCodeSnippetId = getNextId();
 
     updateSection(selectedSection.id, (section) => {
@@ -727,8 +1071,11 @@ export default function Home() {
         contentItems: nextContentItems,
       };
     });
-    setPendingCodeSnippetSelectionId(nextCodeSnippetId);
-  }, [getNextId, selectedSection, updateSection]);
+    setPendingSelectedContentItem({
+      id: nextCodeSnippetId,
+      type: 'codeSnippet',
+    });
+  }, [getNextId, recordHistorySnapshot, selectedSection, updateSection]);
 
   const handleAddImage = useCallback(
     async (file: File) => {
@@ -744,12 +1091,21 @@ export default function Home() {
         return;
       }
 
-      await insertImage({
+      const imageHistorySnapshot = createHistorySnapshot();
+      const wasInserted = await insertImage({
         file,
         id: getNextId(),
       });
+
+      if (!wasInserted) {
+        return;
+      }
+
+      clearActiveHistoryGroup();
+      pushHistorySnapshot('past', imageHistorySnapshot);
+      historyFutureRef.current = [];
     },
-    [getNextId, selectedSection]
+    [clearActiveHistoryGroup, createHistorySnapshot, getNextId, pushHistorySnapshot, selectedSection]
   );
 
   const handleTextboxChange = useCallback(
@@ -758,6 +1114,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`textbox-${id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         textboxes: section.textboxes.map((textbox) =>
@@ -765,7 +1122,7 @@ export default function Home() {
         ),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleLatexChange = useCallback(
@@ -774,6 +1131,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`latex-${id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         latexItems: section.latexItems.map((latexItem) =>
@@ -781,7 +1139,7 @@ export default function Home() {
         ),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleCodeSnippetChange = useCallback(
@@ -790,6 +1148,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`code-${id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         codeSnippets: section.codeSnippets.map((codeSnippet) =>
@@ -797,7 +1156,7 @@ export default function Home() {
         ),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleCodeSnippetLanguageChange = useCallback(
@@ -806,6 +1165,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot();
       updateSection(selectedSection.id, (section) => ({
         ...section,
         codeSnippets: section.codeSnippets.map((codeSnippet) =>
@@ -813,7 +1173,7 @@ export default function Home() {
         ),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleAddImageItem = useCallback(
@@ -854,6 +1214,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`image-${id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         images: section.images.map((image) =>
@@ -861,7 +1222,7 @@ export default function Home() {
         ),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleSectionTitleChange = useCallback(
@@ -870,12 +1231,13 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`section-title-${selectedSection.id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         title,
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleSectionSubtitleChange = useCallback(
@@ -884,12 +1246,13 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(`section-subtitle-${selectedSection.id}`);
       updateSection(selectedSection.id, (section) => ({
         ...section,
         subtitle,
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleDeleteContentItem = useCallback(
@@ -904,6 +1267,7 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot();
       updateSection(selectedSection.id, (section) => ({
         ...section,
         codeSnippets:
@@ -950,8 +1314,11 @@ export default function Home() {
           [selectedSection.id]: nextPanelHeights,
         };
       }
+
+      setPendingSelectedContentItem(null);
+      setSelectedContentItem(null);
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleMoveContentItem = useCallback(
@@ -1032,6 +1399,7 @@ export default function Home() {
         }
       }
 
+      recordHistorySnapshot();
       updateSection(selectedSection.id, (section) => {
         const draggedIndex = section.contentItems.findIndex(
           (item) => item.id === draggedId
@@ -1083,7 +1451,7 @@ export default function Home() {
         };
       });
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
   );
 
   const handleLayoutChange = useCallback(
@@ -1094,6 +1462,7 @@ export default function Home() {
 
       const nextSectionCount = getSectionCount(nextLayout);
 
+      recordHistorySnapshot();
       updateSection(selectedSection.id, (section) => ({
         ...section,
         codeSnippets: section.codeSnippets.map((codeSnippet) => ({
@@ -1120,7 +1489,404 @@ export default function Home() {
         })),
       }));
     },
-    [selectedSection, updateSection]
+    [recordHistorySnapshot, selectedSection, updateSection]
+  );
+
+  const handleDuplicateContentItem = useCallback(
+    (id: number) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      const sourceContentItem = selectedSection.contentItems.find(
+        (item) => item.id === id
+      );
+
+      if (!sourceContentItem) {
+        return;
+      }
+
+      const nextUsedHeight =
+        (sectionUsageHeightsRef.current[sourceContentItem.section] ?? 0) +
+        getContentItemFlowHeight(sourceContentItem);
+
+      if (nextUsedHeight > availablePanelHeightRef.current) {
+        setNotification(OVERFLOW_MESSAGE);
+        return;
+      }
+
+      recordHistorySnapshot();
+      const nextContentItemId = getNextId();
+
+      updateSection(selectedSection.id, (section) => {
+        const sourceIndex = section.contentItems.findIndex((item) => item.id === id);
+
+        if (sourceIndex === -1) {
+          return section;
+        }
+
+        const nextContentItems = [...section.contentItems];
+        nextContentItems.splice(
+          sourceIndex + 1,
+          0,
+          createPanelContentItem(
+            nextContentItemId,
+            sourceContentItem.type,
+            sourceContentItem.section
+          )
+        );
+
+        if (sourceContentItem.type === 'textbox') {
+          const sourceTextbox = section.textboxes.find((textbox) => textbox.id === id);
+
+          if (!sourceTextbox) {
+            return section;
+          }
+
+          return {
+            ...section,
+            contentItems: nextContentItems,
+            textboxes: insertAfterId(
+              section.textboxes,
+              id,
+              createTextboxPanelItem(
+                nextContentItemId,
+                sourceTextbox.section,
+                sourceTextbox.text
+              )
+            ),
+          };
+        }
+
+        if (sourceContentItem.type === 'latex') {
+          const sourceLatex = section.latexItems.find((latexItem) => latexItem.id === id);
+
+          if (!sourceLatex) {
+            return section;
+          }
+
+          return {
+            ...section,
+            contentItems: nextContentItems,
+            latexItems: insertAfterId(
+              section.latexItems,
+              id,
+              createLatexPanelItem(
+                nextContentItemId,
+                sourceLatex.section,
+                sourceLatex.source
+              )
+            ),
+          };
+        }
+
+        if (sourceContentItem.type === 'codeSnippet') {
+          const sourceCodeSnippet = section.codeSnippets.find(
+            (codeSnippet) => codeSnippet.id === id
+          );
+
+          if (!sourceCodeSnippet) {
+            return section;
+          }
+
+          return {
+            ...section,
+            codeSnippets: insertAfterId(
+              section.codeSnippets,
+              id,
+              createCodeSnippetPanelItem(
+                nextContentItemId,
+                sourceCodeSnippet.section,
+                sourceCodeSnippet.language,
+                sourceCodeSnippet.code
+              )
+            ),
+            contentItems: nextContentItems,
+          };
+        }
+
+        const sourceImage = section.images.find((image) => image.id === id);
+
+        if (!sourceImage) {
+          return section;
+        }
+
+        return {
+          ...section,
+          contentItems: nextContentItems,
+          images: insertAfterId(
+            section.images,
+            id,
+            {
+              ...sourceImage,
+              id: nextContentItemId,
+            }
+          ),
+        };
+      });
+      setPendingSelectedContentItem({
+        id: nextContentItemId,
+        type: sourceContentItem.type,
+      });
+    },
+    [
+      getContentItemFlowHeight,
+      getNextId,
+      recordHistorySnapshot,
+      selectedSection,
+      updateSection,
+    ]
+  );
+
+  const handleDeleteObject = useCallback(
+    (objectId: number) => {
+      const currentObjects = objectsRef.current;
+      const objectIndex = currentObjects.findIndex((object) => object.id === objectId);
+
+      if (objectIndex === -1) {
+        return;
+      }
+
+      if (currentObjects.length === 1) {
+        setNotification('At least one Learning Object must remain.');
+        return;
+      }
+
+      const nextObjects = currentObjects.filter((object) => object.id !== objectId);
+      const selectionNeedsFallback = selectedContext?.object.id === objectId;
+
+      recordHistorySnapshot();
+      cleanupSectionCaches(
+        collectSectionIdsFromChildren(currentObjects[objectIndex].children)
+      );
+      updateObjects(() => nextObjects);
+
+      if (selectionNeedsFallback) {
+        setSelectedNodeState(
+          resolveSelectionFallback(
+            [
+              {
+                id: nextObjects[Math.min(objectIndex, nextObjects.length - 1)].id,
+                type: 'object',
+              },
+            ],
+            nextObjects
+          )
+        );
+      }
+    },
+    [
+      cleanupSectionCaches,
+      recordHistorySnapshot,
+      resolveSelectionFallback,
+      selectedContext,
+      setSelectedNodeState,
+      updateObjects,
+    ]
+  );
+
+  const handleDeleteSubobject = useCallback(
+    (subobjectId: number) => {
+      const currentObjects = objectsRef.current;
+      let parentObjectId: number | null = null;
+      let deletedSectionIds: number[] = [];
+      let subobjectIndex = -1;
+
+      const nextObjects = currentObjects.map((object) => {
+        const childIndex = object.children.findIndex(
+          (child) => child.type === 'subobject' && child.id === subobjectId
+        );
+
+        if (childIndex === -1) {
+          return object;
+        }
+
+        const child = object.children[childIndex];
+
+        if (child.type !== 'subobject') {
+          return object;
+        }
+
+        parentObjectId = object.id;
+        subobjectIndex = childIndex;
+        deletedSectionIds = child.sections.map((section) => section.id);
+
+        return {
+          ...object,
+          children: object.children.filter((entry) => entry.id !== subobjectId),
+        };
+      });
+
+      if (deletedSectionIds.length === 0 && parentObjectId === null) {
+        return;
+      }
+
+      const parentObject = nextObjects.find((object) => object.id === parentObjectId);
+
+      if (!parentObject) {
+        return;
+      }
+
+      const selectionNeedsFallback =
+        (selectedContext?.type === 'subobject' &&
+          selectedContext.subobject.id === subobjectId) ||
+        (selectedContext?.type === 'section' &&
+          selectedContext.subobject?.id === subobjectId);
+
+      recordHistorySnapshot();
+      cleanupSectionCaches(deletedSectionIds);
+      updateObjects(() => nextObjects);
+
+      if (selectionNeedsFallback) {
+        setSelectedNodeState(
+          resolveSelectionFallback(
+            [
+              getClosestChildSelection(parentObject.children, subobjectIndex),
+              {
+                id: parentObject.id,
+                type: 'object',
+              },
+            ],
+            nextObjects
+          )
+        );
+      }
+    },
+    [
+      cleanupSectionCaches,
+      recordHistorySnapshot,
+      resolveSelectionFallback,
+      selectedContext,
+      setSelectedNodeState,
+      updateObjects,
+    ]
+  );
+
+  const handleDeleteSection = useCallback(
+    (sectionId: number) => {
+      const currentObjects = objectsRef.current;
+      let parentObjectId: number | null = null;
+      let parentSubobjectId: number | null = null;
+      let sectionIndex = -1;
+
+      const nextObjects = currentObjects.map((object) => {
+        const topLevelSectionIndex = object.children.findIndex(
+          (child) => child.type === 'section' && child.id === sectionId
+        );
+
+        if (topLevelSectionIndex !== -1) {
+          parentObjectId = object.id;
+          sectionIndex = topLevelSectionIndex;
+
+          return {
+            ...object,
+            children: object.children.filter((child) => child.id !== sectionId),
+          };
+        }
+
+        let hasChanged = false;
+        const nextChildren = object.children.map((child) => {
+          if (child.type !== 'subobject') {
+            return child;
+          }
+
+          const nestedSectionIndex = child.sections.findIndex(
+            (section) => section.id === sectionId
+          );
+
+          if (nestedSectionIndex === -1) {
+            return child;
+          }
+
+          parentObjectId = object.id;
+          parentSubobjectId = child.id;
+          sectionIndex = nestedSectionIndex;
+          hasChanged = true;
+
+          return {
+            ...child,
+            sections: child.sections.filter((section) => section.id !== sectionId),
+          };
+        });
+
+        if (!hasChanged) {
+          return object;
+        }
+
+        return {
+          ...object,
+          children: nextChildren,
+        };
+      });
+
+      if (parentObjectId === null || sectionIndex === -1) {
+        return;
+      }
+
+      const parentObject = nextObjects.find((object) => object.id === parentObjectId);
+
+      if (!parentObject) {
+        return;
+      }
+
+      const selectionNeedsFallback =
+        selectedContext?.type === 'section' && selectedContext.section.id === sectionId;
+
+      recordHistorySnapshot();
+      cleanupSectionCaches([sectionId]);
+      updateObjects(() => nextObjects);
+
+      if (!selectionNeedsFallback) {
+        return;
+      }
+
+      if (parentSubobjectId !== null) {
+        const parentSubobject = parentObject.children.find(
+          (child) => child.type === 'subobject' && child.id === parentSubobjectId
+        );
+
+        setSelectedNodeState(
+          resolveSelectionFallback(
+            [
+              parentSubobject?.type === 'subobject'
+                ? getClosestSectionSelection(parentSubobject.sections, sectionIndex)
+                : null,
+              {
+                id: parentSubobjectId,
+                type: 'subobject',
+              },
+              {
+                id: parentObject.id,
+                type: 'object',
+              },
+            ],
+            nextObjects
+          )
+        );
+        return;
+      }
+
+      setSelectedNodeState(
+        resolveSelectionFallback(
+          [
+            getClosestChildSelection(parentObject.children, sectionIndex),
+            {
+              id: parentObject.id,
+              type: 'object',
+            },
+          ],
+          nextObjects
+        )
+      );
+    },
+    [
+      cleanupSectionCaches,
+      recordHistorySnapshot,
+      resolveSelectionFallback,
+      selectedContext,
+      setSelectedNodeState,
+      updateObjects,
+    ]
   );
 
   const handlePanelSectionSelect = useCallback(
@@ -1213,12 +1979,15 @@ export default function Home() {
     []
   );
 
-  const handleLatexSelectionHandled = useCallback(() => {
-    setPendingLatexSelectionId(null);
-  }, []);
+  const handleSelectedContentItemChange = useCallback(
+    (nextSelectedContentItem: SelectedContentItem) => {
+      setSelectedContentItem(nextSelectedContentItem);
+    },
+    []
+  );
 
-  const handleCodeSnippetSelectionHandled = useCallback(() => {
-    setPendingCodeSnippetSelectionId(null);
+  const handlePendingContentSelectionHandled = useCallback(() => {
+    setPendingSelectedContentItem(null);
   }, []);
 
   const handleTextToolbarAction = useCallback((action: TextToolbarAction) => {
@@ -1234,6 +2003,14 @@ export default function Home() {
         return;
       }
 
+      recordHistorySnapshot(
+        `${selectedMetadataNode.type}-${selectedMetadataNode.object.id}-${
+          selectedMetadataNode.type === 'object'
+            ? 'metadata'
+            : selectedMetadataNode.subobject.id
+        }`
+      );
+
       if (selectedMetadataNode.type === 'object') {
         updateObject(selectedMetadataNode.object.id, (object) => ({
           ...object,
@@ -1247,8 +2024,91 @@ export default function Home() {
         [field]: value,
       }));
     },
-    [selectedMetadataNode, updateObject, updateSubobject]
+    [recordHistorySnapshot, selectedMetadataNode, updateObject, updateSubobject]
   );
+
+  const handleSidebarSelection = useCallback(
+    (selection: EditorSelection) => {
+      setSelectedContentItem(null);
+      setPendingSelectedContentItem(null);
+      setSelectedNodeState(selection);
+    },
+    [setSelectedNodeState]
+  );
+
+  const handleDeleteStructuralNode = useCallback(
+    (selection: NonNullable<EditorSelection>) => {
+      setSelectedContentItem(null);
+      setPendingSelectedContentItem(null);
+
+      if (selection.type === 'object') {
+        handleDeleteObject(selection.id);
+        return;
+      }
+
+      if (selection.type === 'subobject') {
+        handleDeleteSubobject(selection.id);
+        return;
+      }
+
+      handleDeleteSection(selection.id);
+    },
+    [handleDeleteObject, handleDeleteSection, handleDeleteSubobject]
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isEditing = isActiveTextEntryTarget(event.target);
+      const modifierKeyPressed = event.metaKey || event.ctrlKey;
+
+      if (
+        !isEditing &&
+        event.key === 'Delete' &&
+        selectedSection &&
+        selectedContentItem
+      ) {
+        event.preventDefault();
+        handleDeleteContentItem(selectedContentItem.id);
+        return;
+      }
+
+      if (isEditing || !modifierKeyPressed || event.altKey) {
+        return;
+      }
+
+      const lowerCaseKey = event.key.toLowerCase();
+
+      if (lowerCaseKey === 'z') {
+        event.preventDefault();
+
+        if (event.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+
+        return;
+      }
+
+      if (lowerCaseKey === 'y') {
+        event.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [
+    handleDeleteContentItem,
+    handleRedo,
+    handleUndo,
+    isActiveTextEntryTarget,
+    selectedContentItem,
+    selectedSection,
+  ]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
@@ -1269,7 +2129,8 @@ export default function Home() {
         <Sidebar
           objects={objects}
           selectedNode={selectedNode}
-          onSelectNode={setSelectedNode}
+          onDeleteNode={handleDeleteStructuralNode}
+          onSelectNode={handleSidebarSelection}
         />
         <main className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-slate-100 px-6 py-8">
           {notification ? (
@@ -1286,9 +2147,8 @@ export default function Home() {
               contentItems={selectedSection.contentItems}
               layout={selectedSection.layout}
               images={selectedSection.images}
-              pendingSelectedCodeSnippetId={pendingCodeSnippetSelectionId}
               latexItems={selectedSection.latexItems}
-              pendingSelectedLatexId={pendingLatexSelectionId}
+              pendingSelectedContentItem={pendingSelectedContentItem}
               selectedSection={selectedSection.selectedSection}
               subtitle={selectedSection.subtitle}
               textboxes={selectedSection.textboxes}
@@ -1298,10 +2158,9 @@ export default function Home() {
               onSubtitleChange={handleSectionSubtitleChange}
               onCodeSnippetChange={handleCodeSnippetChange}
               onCodeSnippetLanguageChange={handleCodeSnippetLanguageChange}
-              onCodeSnippetSelectionHandled={handleCodeSnippetSelectionHandled}
+              onDuplicateContentItem={handleDuplicateContentItem}
               onLatexChange={handleLatexChange}
               onLatexHeightsChange={handleLatexHeightsChange}
-              onLatexSelectionHandled={handleLatexSelectionHandled}
               onTextboxChange={handleTextboxChange}
               onDeleteContentItem={handleDeleteContentItem}
               onAddImage={handleAddImageItem}
@@ -1312,11 +2171,15 @@ export default function Home() {
               onSectionUsageChange={handleSectionUsageChange}
               onMoveContentItem={handleMoveContentItem}
               onOverflow={handleOverflow}
+              onPendingContentSelectionHandled={
+                handlePendingContentSelectionHandled
+              }
               onImageInsertError={handlePanelMessage}
               onRegisterImageInsertHandler={handleRegisterImageInsertHandler}
               onRegisterTextToolbarActionHandler={
                 handleRegisterTextToolbarActionHandler
               }
+              onSelectedContentItemChange={handleSelectedContentItemChange}
               onTextToolbarStateChange={setTextToolbarState}
             />
           ) : selectedMetadataNode ? (

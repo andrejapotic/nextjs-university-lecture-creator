@@ -45,6 +45,12 @@ type ContentItem = PanelContentItem;
 type LatexItem = LatexPanelItem;
 type TextboxItem = TextboxPanelItem;
 type ContentPanelItem = CodeSnippetItem | ImageItem | LatexItem | TextboxItem;
+type SelectedContentItem =
+  | {
+      id: number;
+      type: ContentItem['type'];
+    }
+  | null;
 type LatexToolbarAction = {
   insertLatex?: string;
   label: string;
@@ -88,8 +94,7 @@ type PanelProps = {
   panelHeight: number;
   minTextboxHeight: number;
   layout: LayoutOption;
-  pendingSelectedCodeSnippetId: number | null;
-  pendingSelectedLatexId: number | null;
+  pendingSelectedContentItem: SelectedContentItem;
   selectedSection: number;
   subtitle: string;
   textboxes: TextboxItem[];
@@ -108,10 +113,9 @@ type PanelProps = {
   ) => void;
   onCodeSnippetChange: (id: number, code: string) => void;
   onCodeSnippetLanguageChange: (id: number, language: CodeSnippetLanguage) => void;
-  onCodeSnippetSelectionHandled: () => void;
+  onDuplicateContentItem: (id: number) => void;
   onLatexChange: (id: number, source: string) => void;
   onLatexHeightsChange: (heights: Record<number, number>) => void;
-  onLatexSelectionHandled: () => void;
   onTextboxChange: (id: number, text: string) => void;
   onDeleteContentItem: (id: number) => void;
   onTextboxHeightsChange: (heights: Record<number, number>) => void;
@@ -125,9 +129,11 @@ type PanelProps = {
     position: 'before' | 'after'
   ) => void;
   onOverflow: () => void;
+  onPendingContentSelectionHandled: () => void;
   onRegisterTextToolbarActionHandler: (
     handler: ((action: TextToolbarAction) => void) | null
   ) => void;
+  onSelectedContentItemChange: (item: SelectedContentItem) => void;
   onTextToolbarStateChange: (state: TextToolbarState) => void;
 };
 
@@ -631,8 +637,7 @@ export default function Panel({
   panelHeight,
   minTextboxHeight,
   layout,
-  pendingSelectedCodeSnippetId,
-  pendingSelectedLatexId,
+  pendingSelectedContentItem,
   selectedSection,
   subtitle,
   textboxes,
@@ -646,10 +651,9 @@ export default function Panel({
   onRegisterImageInsertHandler,
   onCodeSnippetChange,
   onCodeSnippetLanguageChange,
-  onCodeSnippetSelectionHandled,
+  onDuplicateContentItem,
   onLatexChange,
   onLatexHeightsChange,
-  onLatexSelectionHandled,
   onTextboxChange,
   onDeleteContentItem,
   onTextboxHeightsChange,
@@ -658,7 +662,9 @@ export default function Panel({
   onSectionUsageChange,
   onMoveContentItem,
   onOverflow,
+  onPendingContentSelectionHandled,
   onRegisterTextToolbarActionHandler,
+  onSelectedContentItemChange,
   onTextToolbarStateChange,
 }: PanelProps) {
   const codeSnippetEditorRefs = useRef<
@@ -673,6 +679,7 @@ export default function Panel({
   const activeTextboxIdRef = useRef<number | null>(null);
   const savedSelectionRef = useRef<Range | null>(null);
   const textToolbarStateRef = useRef<TextToolbarState>(INITIAL_TEXT_TOOLBAR_STATE);
+  const [selectedTextboxId, setSelectedTextboxId] = useState<number | null>(null);
   const [selectedCodeSnippetId, setSelectedCodeSnippetId] = useState<number | null>(
     null
   );
@@ -748,20 +755,26 @@ export default function Panel({
       ),
     [panelItemLookup, sectionContentItems]
   );
-  const activeActionContentItem = useMemo(
+  const selectedContentItem = useMemo(
     () =>
-      contentItems.find((item) => item.id === hoveredContentItemId) ??
+      contentItems.find((item) => item.id === selectedTextboxId) ??
       contentItems.find((item) => item.id === selectedCodeSnippetId) ??
       contentItems.find((item) => item.id === selectedImageId) ??
       contentItems.find((item) => item.id === selectedLatexId) ??
       null,
     [
       contentItems,
-      hoveredContentItemId,
       selectedCodeSnippetId,
       selectedImageId,
       selectedLatexId,
+      selectedTextboxId,
     ]
+  );
+  const activeActionContentItem = useMemo(
+    () =>
+      contentItems.find((item) => item.id === hoveredContentItemId) ??
+      selectedContentItem,
+    [contentItems, hoveredContentItemId, selectedContentItem]
   );
   const selectedLatexItem = useMemo(
     () =>
@@ -770,6 +783,17 @@ export default function Panel({
         : latexItems.find((item) => item.id === selectedLatexId) ?? null,
     [latexItems, selectedLatexId]
   );
+
+  useEffect(() => {
+    onSelectedContentItemChange(
+      selectedContentItem
+        ? {
+            id: selectedContentItem.id,
+            type: selectedContentItem.type,
+          }
+        : null
+    );
+  }, [onSelectedContentItemChange, selectedContentItem]);
 
   const setTextToolbarState = useCallback(
     (nextState: TextToolbarState) => {
@@ -1536,19 +1560,28 @@ export default function Panel({
 
     const panelItem = panelItemLookup.get(id);
 
-    if (panelItem?.type === 'codeSnippet') {
+    if (panelItem?.type === 'textbox') {
+      setSelectedTextboxId(id);
+      setSelectedCodeSnippetId(null);
+      setSelectedImageId(null);
+      setSelectedLatexId(null);
+    } else if (panelItem?.type === 'codeSnippet') {
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(id);
       setSelectedImageId(null);
       setSelectedLatexId(null);
     } else if (panelItem?.type === 'image') {
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(null);
       setSelectedImageId(id);
       setSelectedLatexId(null);
     } else if (panelItem?.type === 'latex') {
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(id);
     } else {
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(null);
@@ -1671,6 +1704,27 @@ export default function Panel({
     clearTextToolbarState();
   }, [clearTextToolbarState]);
 
+  const selectTextboxItem = useCallback(
+    (textbox: TextboxItem) => {
+      if (closeMenuTimeoutRef.current !== null) {
+        window.clearTimeout(closeMenuTimeoutRef.current);
+        closeMenuTimeoutRef.current = null;
+      }
+
+      if (selectedSection !== textbox.section) {
+        onSectionSelect(textbox.section);
+      }
+
+      setSelectedTextboxId(textbox.id);
+      setSelectedCodeSnippetId(null);
+      setSelectedImageId(null);
+      setSelectedLatexId(null);
+      setHoveredContentItemId(textbox.id);
+      updateMenuPosition(textbox.id);
+    },
+    [onSectionSelect, selectedSection, updateMenuPosition]
+  );
+
   const selectLatexItem = useCallback(
     (latexItem: LatexItem) => {
       if (closeMenuTimeoutRef.current !== null) {
@@ -1682,6 +1736,7 @@ export default function Panel({
       if (selectedSection !== latexItem.section) {
         onSectionSelect(latexItem.section);
       }
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(latexItem.id);
@@ -1702,6 +1757,7 @@ export default function Panel({
       if (selectedSection !== codeSnippet.section) {
         onSectionSelect(codeSnippet.section);
       }
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(codeSnippet.id);
       setSelectedImageId(null);
       setSelectedLatexId(null);
@@ -1735,6 +1791,7 @@ export default function Panel({
 
       dismissTextboxUi();
       onSectionSelect(image.section);
+      setSelectedTextboxId(null);
       setSelectedCodeSnippetId(null);
       setSelectedImageId(image.id);
       setSelectedLatexId(null);
@@ -1810,9 +1867,12 @@ export default function Panel({
   }, []);
 
   const handleTextboxFocus = (textboxId: number) => {
-    setSelectedCodeSnippetId(null);
-    setSelectedImageId(null);
-    setSelectedLatexId(null);
+    const textbox = textboxes.find((entry) => entry.id === textboxId);
+
+    if (textbox) {
+      selectTextboxItem(textbox);
+    }
+
     activeTextboxIdRef.current = textboxId;
     updateTextToolbarStateFromSelection(textboxId);
   };
@@ -1895,6 +1955,8 @@ export default function Panel({
             ? selectedCodeSnippetId
           : itemsInSection.some((item) => item.id === selectedLatexId)
             ? selectedLatexId
+          : itemsInSection.some((item) => item.id === selectedTextboxId)
+            ? selectedTextboxId
           : itemsInSection.some((item) => item.id === activeTextboxIdRef.current)
             ? activeTextboxIdRef.current
             : null;
@@ -1944,6 +2006,7 @@ export default function Panel({
         );
         dismissTextboxUi();
         onSectionSelect(selectedSection);
+        setSelectedTextboxId(null);
         setSelectedCodeSnippetId(null);
         setSelectedImageId(id);
         setSelectedLatexId(null);
@@ -1963,6 +2026,7 @@ export default function Panel({
       selectedCodeSnippetId,
       selectedImageId,
       selectedLatexId,
+      selectedTextboxId,
       selectedSection,
     ]
   );
@@ -1976,63 +2040,96 @@ export default function Panel({
   }, [handleInsertImageRequest, onRegisterImageInsertHandler]);
 
   useEffect(() => {
-    if (pendingSelectedCodeSnippetId === null) {
+    if (pendingSelectedContentItem === null) {
       return undefined;
     }
 
-    const codeSnippet = codeSnippets.find(
-      (item) => item.id === pendingSelectedCodeSnippetId
-    );
+    const pendingItem = panelItemLookup.get(pendingSelectedContentItem.id);
 
-    if (!codeSnippet) {
-      onCodeSnippetSelectionHandled();
+    if (!pendingItem || pendingItem.type !== pendingSelectedContentItem.type) {
+      onPendingContentSelectionHandled();
       return undefined;
     }
 
-    selectCodeSnippetItem(codeSnippet);
-    onCodeSnippetSelectionHandled();
+    if (pendingItem.type === 'textbox') {
+      selectTextboxItem(pendingItem);
+      onPendingContentSelectionHandled();
 
-    const frameId = window.requestAnimationFrame(() => {
-      codeSnippetEditorRefs.current[pendingSelectedCodeSnippetId]?.focus();
-    });
+      const frameId = window.requestAnimationFrame(() => {
+        const editor = textboxRefs.current[pendingItem.id];
 
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
+        if (!editor) {
+          return;
+        }
+
+        editor.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        savedSelectionRef.current = range.cloneRange();
+        activeTextboxIdRef.current = pendingItem.id;
+        updateTextToolbarStateFromSelection(pendingItem.id);
+      });
+
+      return () => {
+        window.cancelAnimationFrame(frameId);
+      };
+    }
+
+    if (pendingItem.type === 'codeSnippet') {
+      selectCodeSnippetItem(pendingItem);
+      onPendingContentSelectionHandled();
+
+      const frameId = window.requestAnimationFrame(() => {
+        codeSnippetEditorRefs.current[pendingItem.id]?.focus();
+      });
+
+      return () => {
+        window.cancelAnimationFrame(frameId);
+      };
+    }
+
+    if (pendingItem.type === 'latex') {
+      selectLatexItem(pendingItem);
+      onPendingContentSelectionHandled();
+
+      const frameId = window.requestAnimationFrame(() => {
+        latexEditorRef.current?.focus();
+      });
+
+      return () => {
+        window.cancelAnimationFrame(frameId);
+      };
+    }
+
+    clearTextToolbarState();
+    if (selectedSection !== pendingItem.section) {
+      onSectionSelect(pendingItem.section);
+    }
+    setSelectedTextboxId(null);
+    setSelectedCodeSnippetId(null);
+    setSelectedImageId(pendingItem.id);
+    setSelectedLatexId(null);
+    setHoveredContentItemId(pendingItem.id);
+    updateMenuPosition(pendingItem.id);
+    onPendingContentSelectionHandled();
+    return undefined;
   }, [
-    codeSnippets,
-    onCodeSnippetSelectionHandled,
-    pendingSelectedCodeSnippetId,
+    clearTextToolbarState,
+    onPendingContentSelectionHandled,
+    onSectionSelect,
+    panelItemLookup,
+    pendingSelectedContentItem,
     selectCodeSnippetItem,
-  ]);
-
-  useEffect(() => {
-    if (pendingSelectedLatexId === null) {
-      return undefined;
-    }
-
-    const latexItem = latexItems.find((item) => item.id === pendingSelectedLatexId);
-
-    if (!latexItem) {
-      onLatexSelectionHandled();
-      return undefined;
-    }
-
-    selectLatexItem(latexItem);
-    onLatexSelectionHandled();
-
-    const frameId = window.requestAnimationFrame(() => {
-      latexEditorRef.current?.focus();
-    });
-
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [
-    latexItems,
-    onLatexSelectionHandled,
-    pendingSelectedLatexId,
     selectLatexItem,
+    selectTextboxItem,
+    selectedSection,
+    updateMenuPosition,
+    updateTextToolbarStateFromSelection,
   ]);
 
   useLayoutEffect(() => {
@@ -2053,6 +2150,12 @@ export default function Panel({
       window.removeEventListener('scroll', handleViewportChange, true);
     };
   }, [contentItems, layout, selectedLatexItem, updateLatexEditorPosition]);
+
+  useEffect(() => {
+    if (selectedTextboxId !== null && !textboxes.some((textbox) => textbox.id === selectedTextboxId)) {
+      setSelectedTextboxId(null);
+    }
+  }, [selectedTextboxId, textboxes]);
 
   useEffect(() => {
     if (
@@ -2153,11 +2256,7 @@ export default function Panel({
       return (
         <PanelItemShell
           key={item.id}
-          item={createPanelItemShellState(
-            item,
-            textToolbarStateRef.current.textboxId === item.id &&
-              textToolbarStateRef.current.visible
-          )}
+          item={createPanelItemShellState(item, selectedTextboxId === item.id)}
           itemRef={(element) => {
             wrapperRefs.current[item.id] = element;
           }}
@@ -2394,6 +2493,7 @@ export default function Panel({
                   type="text"
                   value={title}
                   onFocus={() => {
+                    setSelectedTextboxId(null);
                     setSelectedCodeSnippetId(null);
                     setSelectedImageId(null);
                     setSelectedLatexId(null);
@@ -2406,6 +2506,7 @@ export default function Panel({
                   type="text"
                   value={subtitle}
                   onFocus={() => {
+                    setSelectedTextboxId(null);
                     setSelectedCodeSnippetId(null);
                     setSelectedImageId(null);
                     setSelectedLatexId(null);
@@ -2427,6 +2528,7 @@ export default function Panel({
                     onSectionSelect(sectionIndex);
 
                     if (event.target === event.currentTarget) {
+                      setSelectedTextboxId(null);
                       setSelectedCodeSnippetId(null);
                       setSelectedImageId(null);
                       setSelectedLatexId(null);
@@ -2539,8 +2641,31 @@ export default function Panel({
                 <button
                   type="button"
                   onClick={() => {
+                    onDuplicateContentItem(activeActionContentItem.id);
+                    setHoveredContentItemId(null);
+                    setMenuPosition(null);
+                  }}
+                  className="rounded-lg border border-slate-200/80 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors duration-200 hover:bg-slate-50"
+                  aria-label={
+                    activeActionContentItem.type === 'codeSnippet'
+                      ? 'Duplicate code snippet'
+                      : activeActionContentItem.type === 'image'
+                        ? 'Duplicate image'
+                        : activeActionContentItem.type === 'latex'
+                          ? 'Duplicate LaTeX block'
+                          : 'Duplicate textbox'
+                  }
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     onDeleteContentItem(activeActionContentItem.id);
                     setHoveredContentItemId(null);
+                    if (activeActionContentItem.type === 'textbox') {
+                      setSelectedTextboxId(null);
+                    }
                     if (activeActionContentItem.type === 'codeSnippet') {
                       setSelectedCodeSnippetId(null);
                     }
@@ -2557,8 +2682,8 @@ export default function Panel({
                     activeActionContentItem.type === 'codeSnippet'
                       ? 'Delete code snippet'
                       : activeActionContentItem.type === 'image'
-                      ? 'Delete image'
-                      : activeActionContentItem.type === 'latex'
+                        ? 'Delete image'
+                        : activeActionContentItem.type === 'latex'
                         ? 'Delete LaTeX block'
                         : 'Delete textbox'
                   }

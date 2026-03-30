@@ -1,3 +1,7 @@
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { TextboxPanelItem } from './panelItemTypes';
 
 type NodeType = 'object' | 'subobject' | 'section';
@@ -35,13 +39,16 @@ type LearningObjectListItem = {
   type: 'object';
 };
 
+type SidebarSelection = {
+  id: number;
+  type: NodeType;
+} | null;
+
 type SidebarProps = {
   objects: LearningObjectListItem[];
-  selectedNode: {
-    id: number;
-    type: NodeType;
-  } | null;
-  onSelectNode: (selection: SidebarProps['selectedNode']) => void;
+  onDeleteNode: (selection: NonNullable<SidebarSelection>) => void;
+  selectedNode: SidebarSelection;
+  onSelectNode: (selection: SidebarSelection) => void;
 };
 
 const getNodeButtonClass = (isSelected: boolean) =>
@@ -79,9 +86,78 @@ const getSectionLayoutLabel = (layout: LearningSectionListItem['layout']) => {
 
 export default function Sidebar({
   objects,
+  onDeleteNode,
   selectedNode,
   onSelectNode,
 }: SidebarProps) {
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    id: number;
+    left: number;
+    top: number;
+    type: NodeType;
+  } | null>(null);
+
+  useEffect(() => {
+    if (contextMenu === null) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        contextMenuRef.current &&
+        event.target instanceof Node &&
+        contextMenuRef.current.contains(event.target)
+      ) {
+        return;
+      }
+
+      setContextMenu(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    const handleScroll = () => {
+      setContextMenu(null);
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    selection: NonNullable<SidebarSelection>
+  ) => {
+    event.preventDefault();
+
+    const contextMenuWidth = 180;
+    const contextMenuHeight = 56;
+
+    setContextMenu({
+      ...selection,
+      left: Math.max(
+        12,
+        Math.min(event.clientX, window.innerWidth - contextMenuWidth - 12)
+      ),
+      top: Math.max(
+        12,
+        Math.min(event.clientY, window.innerHeight - contextMenuHeight - 12)
+      ),
+    });
+  };
+
   const renderSection = (
     section: LearningSectionListItem,
     fallbackTitle: string
@@ -95,6 +171,12 @@ export default function Sidebar({
         type="button"
         onClick={() =>
           onSelectNode({
+            id: section.id,
+            type: 'section',
+          })
+        }
+        onContextMenu={(event) =>
+          openContextMenu(event, {
             id: section.id,
             type: 'section',
           })
@@ -136,6 +218,12 @@ export default function Sidebar({
           type="button"
           onClick={() =>
             onSelectNode({
+              id: subobject.id,
+              type: 'subobject',
+            })
+          }
+          onContextMenu={(event) =>
+            openContextMenu(event, {
               id: subobject.id,
               type: 'subobject',
             })
@@ -195,6 +283,12 @@ export default function Sidebar({
                     type: 'object',
                   })
                 }
+                onContextMenu={(event) =>
+                  openContextMenu(event, {
+                    id: object.id,
+                    type: 'object',
+                  })
+                }
                 aria-pressed={isSelected}
                 className={getNodeButtonClass(isSelected)}
               >
@@ -232,6 +326,36 @@ export default function Sidebar({
           );
         })}
       </div>
+      {contextMenu !== null
+        ? createPortal(
+            <div
+              ref={contextMenuRef}
+              className="animate-surface-in fixed z-50 min-w-[180px] rounded-xl border border-slate-200/90 bg-white/96 p-2 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.45)] backdrop-blur-xl"
+              style={{
+                left: contextMenu.left,
+                top: contextMenu.top,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteNode({
+                    id: contextMenu.id,
+                    type: contextMenu.type,
+                  });
+                  setContextMenu(null);
+                }}
+                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition-colors duration-200 hover:bg-red-50"
+              >
+                <span>Delete</span>
+                <span className="text-[11px] uppercase tracking-[0.16em] text-red-400">
+                  {contextMenu.type}
+                </span>
+              </button>
+            </div>,
+            document.body
+          )
+        : null}
     </aside>
   );
 }
