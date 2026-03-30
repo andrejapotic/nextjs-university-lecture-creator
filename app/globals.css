@@ -76,6 +76,52 @@ body {
   display: none;
 }
 
+.code-snippet-editor {
+  height: 100%;
+}
+
+.code-snippet-editor .cm-editor {
+  height: 100%;
+  background: rgb(248 250 252 / 0.82);
+  color: rgb(15 23 42);
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.code-snippet-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+.code-snippet-editor .cm-scroller {
+  overflow: auto;
+  font-family: inherit;
+}
+
+.code-snippet-editor .cm-content,
+.code-snippet-editor .cm-gutterElement {
+  min-height: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.code-snippet-editor .cm-content {
+  padding: 12px 0;
+}
+
+.code-snippet-editor .cm-gutters {
+  border-right: 1px solid rgb(226 232 240 / 0.9);
+  background: rgb(241 245 249 / 0.9);
+  color: rgb(100 116 139);
+}
+
+.code-snippet-editor .cm-activeLine {
+  background: rgb(226 232 240 / 0.45);
+}
+
+.code-snippet-editor .cm-activeLineGutter {
+  background: rgb(226 232 240 / 0.65);
+}
+
 ::selection {
   background: rgba(125, 211, 252, 0.32);
   color: inherit;

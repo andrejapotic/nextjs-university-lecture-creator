@@ -25,6 +25,7 @@ import ToolbarAction, {
 import type { TextToolbarAction, TextToolbarState } from './textEditorTypes';
 
 type NavbarProps = {
+  onAddCodeSnippet: () => void;
   onAddObject: () => void;
   onAddImage: (file: File) => void;
   onAddLatex: () => void;
@@ -36,6 +37,7 @@ type NavbarProps = {
 };
 
 export default function Navbar({
+  onAddCodeSnippet,
   onAddObject,
   onAddImage,
   onAddLatex,
@@ -72,7 +74,7 @@ export default function Navbar({
             <Textbox onAdd={onAddTextbox} />
             <ImageTool onAdd={onAddImage} />
             <Latex onAdd={onAddLatex} />
-            <CodeSnippet />
+            <CodeSnippet onAdd={onAddCodeSnippet} />
           </div>
           <div
             className={`flex min-w-0 items-center transition-[max-width,opacity,transform,margin] duration-200 ease-out ${

@@ -1,4 +1,13 @@
 export type PanelItemType = 'textbox' | 'image' | 'latex' | 'codeSnippet';
+export type CodeSnippetLanguage =
+  | 'javascript'
+  | 'typescript'
+  | 'csharp'
+  | 'java'
+  | 'python'
+  | 'sql'
+  | 'html'
+  | 'css';
 
 export type PanelItemFrame = {
   height: number | null;
@@ -38,7 +47,7 @@ export type ImageInsertRequest = {
 export type PanelContentItem = {
   id: number;
   section: number;
-  type: 'image' | 'latex' | 'textbox';
+  type: 'codeSnippet' | 'image' | 'latex' | 'textbox';
 };
 
 export type LatexPanelItem = PanelItemBase<'latex'> & {
@@ -48,7 +57,8 @@ export type LatexPanelItem = PanelItemBase<'latex'> & {
 
 export type CodeSnippetPanelItem = PanelItemBase<'codeSnippet'> & {
   code: string;
-  language: string;
+  language: CodeSnippetLanguage;
+  section: number;
 };
 
 export type PanelItem =
@@ -72,6 +82,21 @@ const PANEL_ITEM_FRAME_DEFAULTS: PanelItemFrame = {
   y: null,
   zIndex: 0,
 };
+
+export const CODE_SNIPPET_BLOCK_HEIGHT = 232;
+export const CODE_SNIPPET_LANGUAGE_OPTIONS: Array<{
+  id: CodeSnippetLanguage;
+  label: string;
+}> = [
+  { id: 'javascript', label: 'JavaScript' },
+  { id: 'typescript', label: 'TypeScript' },
+  { id: 'csharp', label: 'C#' },
+  { id: 'java', label: 'Java' },
+  { id: 'python', label: 'Python' },
+  { id: 'sql', label: 'SQL' },
+  { id: 'html', label: 'HTML' },
+  { id: 'css', label: 'CSS' },
+];
 
 export const createTextboxPanelItem = (
   id: number,
@@ -142,6 +167,20 @@ export const createLatexPanelItem = (
   section,
   source,
   type: 'latex',
+});
+
+export const createCodeSnippetPanelItem = (
+  id: number,
+  section: number,
+  language: CodeSnippetLanguage = 'javascript',
+  code = ''
+): CodeSnippetPanelItem => ({
+  ...PANEL_ITEM_FRAME_DEFAULTS,
+  code,
+  id,
+  language,
+  section,
+  type: 'codeSnippet',
 });
 
 export const createPanelItemShellState = (

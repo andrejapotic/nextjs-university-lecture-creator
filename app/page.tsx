@@ -6,9 +6,13 @@ import Sidebar from '../components/Sidebar';
 import Panel from '../components/Panel';
 import LearningMetadataEditor from '../components/LearningMetadataEditor';
 import {
+  CODE_SNIPPET_BLOCK_HEIGHT,
+  createCodeSnippetPanelItem,
   createLatexPanelItem,
   createPanelContentItem,
   createTextboxPanelItem,
+  type CodeSnippetLanguage,
+  type CodeSnippetPanelItem,
   type ImageInsertRequest,
   type ImagePanelItem,
   type LatexPanelItem,
@@ -25,6 +29,7 @@ type LayoutOption = 'blank' | 'split' | 'thirds';
 type NodeType = 'object' | 'subobject' | 'section';
 
 type LearningSectionItem = {
+  codeSnippets: CodeSnippetPanelItem[];
   contentItems: PanelContentItem[];
   images: ImagePanelItem[];
   id: number;
@@ -132,6 +137,7 @@ const createLearningSection = (
   parentId: number,
   parentType: LearningSectionItem['parentType']
 ): LearningSectionItem => ({
+  codeSnippets: [],
   contentItems: [],
   images: [],
   id,
@@ -278,6 +284,8 @@ const findSelectionContext = (
 export default function Home() {
   const [objects, setObjects] = useState<LearningObjectItem[]>(INITIAL_OBJECTS);
   const [selectedNode, setSelectedNode] = useState<EditorSelection>(INITIAL_SELECTION);
+  const [pendingCodeSnippetSelectionId, setPendingCodeSnippetSelectionId] =
+    useState<number | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [pendingLatexSelectionId, setPendingLatexSelectionId] = useState<number | null>(
     null
@@ -676,6 +684,52 @@ export default function Home() {
     setPendingLatexSelectionId(nextLatexId);
   }, [getNextId, selectedSection, updateSection]);
 
+  const handleAddCodeSnippet = useCallback(() => {
+    if (!selectedSection) {
+      setNotification('Select a Learning Section before adding a code snippet.');
+      return;
+    }
+
+    const usedHeight =
+      sectionUsageHeightsRef.current[selectedSection.selectedSection] ?? 0;
+
+    if (usedHeight + CODE_SNIPPET_BLOCK_HEIGHT > availablePanelHeightRef.current) {
+      setNotification(OVERFLOW_MESSAGE);
+      return;
+    }
+
+    const nextCodeSnippetId = getNextId();
+
+    updateSection(selectedSection.id, (section) => {
+      const nextCodeSnippet = createCodeSnippetPanelItem(
+        nextCodeSnippetId,
+        section.selectedSection
+      );
+      const nextContentItems = [...section.contentItems];
+
+      nextContentItems.splice(
+        getSectionContentInsertIndex(
+          section.contentItems,
+          section.selectedSection,
+          null
+        ),
+        0,
+        createPanelContentItem(
+          nextCodeSnippetId,
+          'codeSnippet',
+          section.selectedSection
+        )
+      );
+
+      return {
+        ...section,
+        codeSnippets: [...section.codeSnippets, nextCodeSnippet],
+        contentItems: nextContentItems,
+      };
+    });
+    setPendingCodeSnippetSelectionId(nextCodeSnippetId);
+  }, [getNextId, selectedSection, updateSection]);
+
   const handleAddImage = useCallback(
     async (file: File) => {
       if (!selectedSection) {
@@ -724,6 +778,38 @@ export default function Home() {
         ...section,
         latexItems: section.latexItems.map((latexItem) =>
           latexItem.id === id ? { ...latexItem, source } : latexItem
+        ),
+      }));
+    },
+    [selectedSection, updateSection]
+  );
+
+  const handleCodeSnippetChange = useCallback(
+    (id: number, code: string) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      updateSection(selectedSection.id, (section) => ({
+        ...section,
+        codeSnippets: section.codeSnippets.map((codeSnippet) =>
+          codeSnippet.id === id ? { ...codeSnippet, code } : codeSnippet
+        ),
+      }));
+    },
+    [selectedSection, updateSection]
+  );
+
+  const handleCodeSnippetLanguageChange = useCallback(
+    (id: number, language: CodeSnippetLanguage) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      updateSection(selectedSection.id, (section) => ({
+        ...section,
+        codeSnippets: section.codeSnippets.map((codeSnippet) =>
+          codeSnippet.id === id ? { ...codeSnippet, language } : codeSnippet
         ),
       }));
     },
@@ -820,6 +906,10 @@ export default function Home() {
 
       updateSection(selectedSection.id, (section) => ({
         ...section,
+        codeSnippets:
+          itemToDelete.type === 'codeSnippet'
+            ? section.codeSnippets.filter((codeSnippet) => codeSnippet.id !== id)
+            : section.codeSnippets,
         contentItems: section.contentItems.filter((item) => item.id !== id),
         images:
           itemToDelete.type === 'image'
@@ -925,6 +1015,23 @@ export default function Home() {
         }
       }
 
+      if (draggedContentItem.type === 'codeSnippet') {
+        const sourceSection = selectedSection.codeSnippets.find(
+          (codeSnippet) => codeSnippet.id === draggedId
+        )?.section;
+        const targetHeight = sectionUsageHeightsRef.current[targetSection] ?? 0;
+
+        if (
+          sourceSection !== undefined &&
+          sourceSection !== targetSection &&
+          targetHeight + CODE_SNIPPET_BLOCK_HEIGHT >
+            availablePanelHeightRef.current
+        ) {
+          setNotification(OVERFLOW_MESSAGE);
+          return;
+        }
+      }
+
       updateSection(selectedSection.id, (section) => {
         const draggedIndex = section.contentItems.findIndex(
           (item) => item.id === draggedId
@@ -954,6 +1061,11 @@ export default function Home() {
 
         return {
           ...section,
+          codeSnippets: section.codeSnippets.map((codeSnippet) =>
+            codeSnippet.id === draggedId
+              ? { ...codeSnippet, section: targetSection }
+              : codeSnippet
+          ),
           contentItems: nextContentItems,
           images: section.images.map((image) =>
             image.id === draggedId ? { ...image, section: targetSection } : image
@@ -984,6 +1096,10 @@ export default function Home() {
 
       updateSection(selectedSection.id, (section) => ({
         ...section,
+        codeSnippets: section.codeSnippets.map((codeSnippet) => ({
+          ...codeSnippet,
+          section: Math.min(codeSnippet.section, nextSectionCount - 1),
+        })),
         contentItems: section.contentItems.map((item) => ({
           ...item,
           section: Math.min(item.section, nextSectionCount - 1),
@@ -1101,6 +1217,10 @@ export default function Home() {
     setPendingLatexSelectionId(null);
   }, []);
 
+  const handleCodeSnippetSelectionHandled = useCallback(() => {
+    setPendingCodeSnippetSelectionId(null);
+  }, []);
+
   const handleTextToolbarAction = useCallback((action: TextToolbarAction) => {
     textToolbarActionHandlerRef.current?.(action);
   }, []);
@@ -1133,6 +1253,7 @@ export default function Home() {
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <Navbar
+        onAddCodeSnippet={handleAddCodeSnippet}
         onAddObject={handleAddObject}
         onAddImage={handleAddImage}
         onAddLatex={handleAddLatex}
@@ -1161,9 +1282,11 @@ export default function Home() {
               key={selectedSection.id}
               panelHeight={PANEL_HEIGHT}
               minTextboxHeight={MIN_TEXTBOX_HEIGHT}
+              codeSnippets={selectedSection.codeSnippets}
               contentItems={selectedSection.contentItems}
               layout={selectedSection.layout}
               images={selectedSection.images}
+              pendingSelectedCodeSnippetId={pendingCodeSnippetSelectionId}
               latexItems={selectedSection.latexItems}
               pendingSelectedLatexId={pendingLatexSelectionId}
               selectedSection={selectedSection.selectedSection}
@@ -1173,6 +1296,9 @@ export default function Home() {
               onLayoutChange={handleLayoutChange}
               onSectionSelect={handlePanelSectionSelect}
               onSubtitleChange={handleSectionSubtitleChange}
+              onCodeSnippetChange={handleCodeSnippetChange}
+              onCodeSnippetLanguageChange={handleCodeSnippetLanguageChange}
+              onCodeSnippetSelectionHandled={handleCodeSnippetSelectionHandled}
               onLatexChange={handleLatexChange}
               onLatexHeightsChange={handleLatexHeightsChange}
               onLatexSelectionHandled={handleLatexSelectionHandled}

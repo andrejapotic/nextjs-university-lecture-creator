@@ -10,10 +10,17 @@ import {
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import CodeSnippetEditor, {
+  type CodeSnippetEditorHandle,
+} from './CodeSnippetEditor';
 import LatexMathEditor, { type LatexMathEditorHandle } from './LatexMathEditor';
 import PanelItemShell from './PanelItemShell';
 import Section from './Section';
 import {
+  CODE_SNIPPET_BLOCK_HEIGHT,
+  CODE_SNIPPET_LANGUAGE_OPTIONS,
+  type CodeSnippetLanguage,
+  type CodeSnippetPanelItem,
   createImagePanelItem,
   createPanelItemShellState,
   type ImageInsertRequest,
@@ -32,11 +39,12 @@ import {
 
 type LayoutOption = 'blank' | 'split' | 'thirds';
 
+type CodeSnippetItem = CodeSnippetPanelItem;
 type ImageItem = ImagePanelItem;
 type ContentItem = PanelContentItem;
 type LatexItem = LatexPanelItem;
 type TextboxItem = TextboxPanelItem;
-type ContentPanelItem = ImageItem | LatexItem | TextboxItem;
+type ContentPanelItem = CodeSnippetItem | ImageItem | LatexItem | TextboxItem;
 type LatexToolbarAction = {
   insertLatex?: string;
   label: string;
@@ -73,12 +81,14 @@ type ImageInteraction =
     };
 
 type PanelProps = {
+  codeSnippets: CodeSnippetItem[];
   contentItems: ContentItem[];
   images: ImageItem[];
   latexItems: LatexItem[];
   panelHeight: number;
   minTextboxHeight: number;
   layout: LayoutOption;
+  pendingSelectedCodeSnippetId: number | null;
   pendingSelectedLatexId: number | null;
   selectedSection: number;
   subtitle: string;
@@ -96,6 +106,9 @@ type PanelProps = {
   onRegisterImageInsertHandler: (
     handler: ((request: ImageInsertRequest) => Promise<boolean>) | null
   ) => void;
+  onCodeSnippetChange: (id: number, code: string) => void;
+  onCodeSnippetLanguageChange: (id: number, language: CodeSnippetLanguage) => void;
+  onCodeSnippetSelectionHandled: () => void;
   onLatexChange: (id: number, source: string) => void;
   onLatexHeightsChange: (heights: Record<number, number>) => void;
   onLatexSelectionHandled: () => void;
@@ -611,12 +624,14 @@ const applyFragmentToCurrentSelection = (
 };
 
 export default function Panel({
+  codeSnippets,
   contentItems,
   images,
   latexItems,
   panelHeight,
   minTextboxHeight,
   layout,
+  pendingSelectedCodeSnippetId,
   pendingSelectedLatexId,
   selectedSection,
   subtitle,
@@ -629,6 +644,9 @@ export default function Panel({
   onImageChange,
   onImageInsertError,
   onRegisterImageInsertHandler,
+  onCodeSnippetChange,
+  onCodeSnippetLanguageChange,
+  onCodeSnippetSelectionHandled,
   onLatexChange,
   onLatexHeightsChange,
   onLatexSelectionHandled,
@@ -643,6 +661,9 @@ export default function Panel({
   onRegisterTextToolbarActionHandler,
   onTextToolbarStateChange,
 }: PanelProps) {
+  const codeSnippetEditorRefs = useRef<
+    Record<number, CodeSnippetEditorHandle | null>
+  >({});
   const latexEditorRef = useRef<LatexMathEditorHandle | null>(null);
   const textboxRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const wrapperRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -652,6 +673,9 @@ export default function Panel({
   const activeTextboxIdRef = useRef<number | null>(null);
   const savedSelectionRef = useRef<Range | null>(null);
   const textToolbarStateRef = useRef<TextToolbarState>(INITIAL_TEXT_TOOLBAR_STATE);
+  const [selectedCodeSnippetId, setSelectedCodeSnippetId] = useState<number | null>(
+    null
+  );
   const [selectedImageId, setSelectedImageId] = useState<number | null>(null);
   const [selectedLatexId, setSelectedLatexId] = useState<number | null>(null);
   const [imageInteraction, setImageInteraction] = useState<ImageInteraction | null>(
@@ -694,6 +718,10 @@ export default function Panel({
       nextLookup.set(textbox.id, textbox);
     });
 
+    codeSnippets.forEach((codeSnippet) => {
+      nextLookup.set(codeSnippet.id, codeSnippet);
+    });
+
     latexItems.forEach((latexItem) => {
       nextLookup.set(latexItem.id, latexItem);
     });
@@ -703,7 +731,7 @@ export default function Panel({
     });
 
     return nextLookup;
-  }, [images, latexItems, textboxes]);
+  }, [codeSnippets, images, latexItems, textboxes]);
   const sectionContentItems = useMemo(
     () =>
       Array.from({ length: sectionCount }, (_, sectionIndex) =>
@@ -723,10 +751,17 @@ export default function Panel({
   const activeActionContentItem = useMemo(
     () =>
       contentItems.find((item) => item.id === hoveredContentItemId) ??
+      contentItems.find((item) => item.id === selectedCodeSnippetId) ??
       contentItems.find((item) => item.id === selectedImageId) ??
       contentItems.find((item) => item.id === selectedLatexId) ??
       null,
-    [contentItems, hoveredContentItemId, selectedImageId, selectedLatexId]
+    [
+      contentItems,
+      hoveredContentItemId,
+      selectedCodeSnippetId,
+      selectedImageId,
+      selectedLatexId,
+    ]
   );
   const selectedLatexItem = useMemo(
     () =>
@@ -771,6 +806,10 @@ export default function Panel({
 
       if (panelItem.type === 'image') {
         return getImageWrapperHeight(panelItem);
+      }
+
+      if (panelItem.type === 'codeSnippet') {
+        return CODE_SNIPPET_BLOCK_HEIGHT;
       }
 
       if (panelItem.type === 'latex') {
@@ -1483,6 +1522,7 @@ export default function Panel({
     };
   }, [
     activeActionContentItem,
+    codeSnippets,
     contentItems,
     images,
     latexItems,
@@ -1496,13 +1536,20 @@ export default function Panel({
 
     const panelItem = panelItemLookup.get(id);
 
-    if (panelItem?.type === 'image') {
+    if (panelItem?.type === 'codeSnippet') {
+      setSelectedCodeSnippetId(id);
+      setSelectedImageId(null);
+      setSelectedLatexId(null);
+    } else if (panelItem?.type === 'image') {
+      setSelectedCodeSnippetId(null);
       setSelectedImageId(id);
       setSelectedLatexId(null);
     } else if (panelItem?.type === 'latex') {
+      setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(id);
     } else {
+      setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(null);
     }
@@ -1635,10 +1682,31 @@ export default function Panel({
       if (selectedSection !== latexItem.section) {
         onSectionSelect(latexItem.section);
       }
+      setSelectedCodeSnippetId(null);
       setSelectedImageId(null);
       setSelectedLatexId(latexItem.id);
       setHoveredContentItemId(latexItem.id);
       updateMenuPosition(latexItem.id);
+    },
+    [clearTextToolbarState, onSectionSelect, selectedSection, updateMenuPosition]
+  );
+
+  const selectCodeSnippetItem = useCallback(
+    (codeSnippet: CodeSnippetItem) => {
+      if (closeMenuTimeoutRef.current !== null) {
+        window.clearTimeout(closeMenuTimeoutRef.current);
+        closeMenuTimeoutRef.current = null;
+      }
+
+      clearTextToolbarState();
+      if (selectedSection !== codeSnippet.section) {
+        onSectionSelect(codeSnippet.section);
+      }
+      setSelectedCodeSnippetId(codeSnippet.id);
+      setSelectedImageId(null);
+      setSelectedLatexId(null);
+      setHoveredContentItemId(codeSnippet.id);
+      updateMenuPosition(codeSnippet.id);
     },
     [clearTextToolbarState, onSectionSelect, selectedSection, updateMenuPosition]
   );
@@ -1667,6 +1735,7 @@ export default function Panel({
 
       dismissTextboxUi();
       onSectionSelect(image.section);
+      setSelectedCodeSnippetId(null);
       setSelectedImageId(image.id);
       setSelectedLatexId(null);
       setImageInteraction({
@@ -1710,6 +1779,17 @@ export default function Panel({
     [selectLatexItem]
   );
 
+  const handleCodeSnippetMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>, codeSnippet: CodeSnippetItem) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      selectCodeSnippetItem(codeSnippet);
+    },
+    [selectCodeSnippetItem]
+  );
+
   const handleLatexToolbarAction = useCallback((action: LatexToolbarAction) => {
     if (!latexEditorRef.current) {
       return;
@@ -1730,6 +1810,7 @@ export default function Panel({
   }, []);
 
   const handleTextboxFocus = (textboxId: number) => {
+    setSelectedCodeSnippetId(null);
     setSelectedImageId(null);
     setSelectedLatexId(null);
     activeTextboxIdRef.current = textboxId;
@@ -1810,6 +1891,8 @@ export default function Panel({
         const itemsInSection = sectionContentItems[selectedSection] ?? [];
         const anchorId = itemsInSection.some((item) => item.id === selectedImageId)
           ? selectedImageId
+          : itemsInSection.some((item) => item.id === selectedCodeSnippetId)
+            ? selectedCodeSnippetId
           : itemsInSection.some((item) => item.id === selectedLatexId)
             ? selectedLatexId
           : itemsInSection.some((item) => item.id === activeTextboxIdRef.current)
@@ -1861,6 +1944,7 @@ export default function Panel({
         );
         dismissTextboxUi();
         onSectionSelect(selectedSection);
+        setSelectedCodeSnippetId(null);
         setSelectedImageId(id);
         setSelectedLatexId(null);
         return true;
@@ -1876,6 +1960,7 @@ export default function Panel({
       onImageInsertError,
       onSectionSelect,
       sectionContentItems,
+      selectedCodeSnippetId,
       selectedImageId,
       selectedLatexId,
       selectedSection,
@@ -1889,6 +1974,37 @@ export default function Panel({
       onRegisterImageInsertHandler(null);
     };
   }, [handleInsertImageRequest, onRegisterImageInsertHandler]);
+
+  useEffect(() => {
+    if (pendingSelectedCodeSnippetId === null) {
+      return undefined;
+    }
+
+    const codeSnippet = codeSnippets.find(
+      (item) => item.id === pendingSelectedCodeSnippetId
+    );
+
+    if (!codeSnippet) {
+      onCodeSnippetSelectionHandled();
+      return undefined;
+    }
+
+    selectCodeSnippetItem(codeSnippet);
+    onCodeSnippetSelectionHandled();
+
+    const frameId = window.requestAnimationFrame(() => {
+      codeSnippetEditorRefs.current[pendingSelectedCodeSnippetId]?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [
+    codeSnippets,
+    onCodeSnippetSelectionHandled,
+    pendingSelectedCodeSnippetId,
+    selectCodeSnippetItem,
+  ]);
 
   useEffect(() => {
     if (pendingSelectedLatexId === null) {
@@ -1937,6 +2053,15 @@ export default function Panel({
       window.removeEventListener('scroll', handleViewportChange, true);
     };
   }, [contentItems, layout, selectedLatexItem, updateLatexEditorPosition]);
+
+  useEffect(() => {
+    if (
+      selectedCodeSnippetId !== null &&
+      !codeSnippets.some((codeSnippet) => codeSnippet.id === selectedCodeSnippetId)
+    ) {
+      setSelectedCodeSnippetId(null);
+    }
+  }, [codeSnippets, selectedCodeSnippetId]);
 
   useEffect(() => {
     if (selectedImageId !== null && !images.some((image) => image.id === selectedImageId)) {
@@ -2061,6 +2186,80 @@ export default function Panel({
             onMouseUp={() => updateTextToolbarStateFromSelection(item.id)}
             className="textbox-editor w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
           />
+        </PanelItemShell>
+      );
+    }
+
+    if (item.type === 'codeSnippet') {
+      const isSelected = selectedCodeSnippetId === item.id;
+      const dropIndicator =
+        dropTarget?.type === 'item' && dropTarget.id === item.id
+          ? dropTarget.position
+          : null;
+
+      return (
+        <PanelItemShell
+          key={item.id}
+          item={createPanelItemShellState(item, isSelected)}
+          itemRef={(element) => {
+            wrapperRefs.current[item.id] = element;
+          }}
+          dropIndicator={dropIndicator}
+          onDragOver={(event) => handleDragOver(event, item)}
+          onDrop={(event) => handleDrop(event, item)}
+          onMouseDown={(event) => handleCodeSnippetMouseDown(event, item)}
+          onMouseEnter={() => handleContentItemMouseEnter(item.id)}
+          onMouseLeave={scheduleMenuClose}
+          style={{ height: `${CODE_SNIPPET_BLOCK_HEIGHT}px` }}
+        >
+          <div
+            className={`flex h-full min-h-0 flex-col border bg-white/95 transition-[border-color,box-shadow,transform] duration-200 ease-out ${
+              isSelected
+                ? 'border-sky-300 shadow-[0_24px_50px_-30px_rgba(14,165,233,0.42)] ring-2 ring-sky-200/70'
+                : 'border-slate-200/80 shadow-[0_18px_40px_-32px_rgba(15,23,42,0.28)] hover:border-slate-300'
+            }`}
+          >
+            <div className="flex items-center justify-between border-b border-slate-200/80 px-3 py-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  Code snippet
+                </span>
+                <span className="text-xs text-slate-400">CodeMirror 6</span>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-slate-500">
+                <span className="sr-only">Language</span>
+                <select
+                  value={item.language}
+                  aria-label={`Code snippet language ${index + 1}`}
+                  onFocus={() => selectCodeSnippetItem(item)}
+                  onChange={(event) =>
+                    onCodeSnippetLanguageChange(
+                      item.id,
+                      event.target.value as CodeSnippetLanguage
+                    )
+                  }
+                  className="border border-slate-200/80 bg-white px-2 py-1 font-medium text-slate-700 outline-none transition-[border-color,box-shadow] duration-200 ease-out focus:border-sky-300 focus:shadow-[0_0_0_3px_rgba(125,211,252,0.18)]"
+                >
+                  {CODE_SNIPPET_LANGUAGE_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="min-h-0 flex-1">
+              <CodeSnippetEditor
+                ref={(instance) => {
+                  codeSnippetEditorRefs.current[item.id] = instance;
+                }}
+                language={item.language}
+                value={item.code}
+                onFocus={() => selectCodeSnippetItem(item)}
+                onChange={(code) => onCodeSnippetChange(item.id, code)}
+              />
+            </div>
+          </div>
         </PanelItemShell>
       );
     }
@@ -2195,6 +2394,7 @@ export default function Panel({
                   type="text"
                   value={title}
                   onFocus={() => {
+                    setSelectedCodeSnippetId(null);
                     setSelectedImageId(null);
                     setSelectedLatexId(null);
                   }}
@@ -2206,6 +2406,7 @@ export default function Panel({
                   type="text"
                   value={subtitle}
                   onFocus={() => {
+                    setSelectedCodeSnippetId(null);
                     setSelectedImageId(null);
                     setSelectedLatexId(null);
                   }}
@@ -2226,6 +2427,7 @@ export default function Panel({
                     onSectionSelect(sectionIndex);
 
                     if (event.target === event.currentTarget) {
+                      setSelectedCodeSnippetId(null);
                       setSelectedImageId(null);
                       setSelectedLatexId(null);
                     }
@@ -2339,6 +2541,9 @@ export default function Panel({
                   onClick={() => {
                     onDeleteContentItem(activeActionContentItem.id);
                     setHoveredContentItemId(null);
+                    if (activeActionContentItem.type === 'codeSnippet') {
+                      setSelectedCodeSnippetId(null);
+                    }
                     if (activeActionContentItem.type === 'image') {
                       setSelectedImageId(null);
                     }
@@ -2349,7 +2554,9 @@ export default function Panel({
                   }}
                   className="rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors duration-200 hover:bg-red-50"
                   aria-label={
-                    activeActionContentItem.type === 'image'
+                    activeActionContentItem.type === 'codeSnippet'
+                      ? 'Delete code snippet'
+                      : activeActionContentItem.type === 'image'
                       ? 'Delete image'
                       : activeActionContentItem.type === 'latex'
                         ? 'Delete LaTeX block'
