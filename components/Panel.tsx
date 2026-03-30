@@ -9,7 +9,17 @@ import {
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import PanelItemShell from './PanelItemShell';
 import Section from './Section';
+import {
+  createImagePanelItem,
+  createPanelItemShellState,
+  type ImageInsertRequest,
+  type ImagePanelItem,
+  type PanelContentItem,
+  type PanelItem,
+  type TextboxPanelItem,
+} from './panelItemTypes';
 import {
   INITIAL_TEXT_TOOLBAR_STATE,
   type SemanticTextStyle,
@@ -19,13 +29,41 @@ import {
 
 type LayoutOption = 'blank' | 'split' | 'thirds';
 
-type TextboxItem = {
-  id: number;
-  text: string;
-  section: number;
-};
+type ImageItem = ImagePanelItem;
+type ContentItem = PanelContentItem;
+type TextboxItem = TextboxPanelItem;
+type ContentPanelItem = ImageItem | TextboxItem;
+type ImageInteraction =
+  | {
+      availableHeight: number;
+      aspectRatio: number;
+      imageId: number;
+      mode: 'drag';
+      originHeight: number;
+      originWidth: number;
+      originX: number;
+      originY: number;
+      sectionWidth: number;
+      startX: number;
+      startY: number;
+    }
+  | {
+      availableHeight: number;
+      aspectRatio: number;
+      imageId: number;
+      mode: 'resize';
+      originHeight: number;
+      originWidth: number;
+      originX: number;
+      originY: number;
+      sectionWidth: number;
+      startX: number;
+      startY: number;
+    };
 
 type PanelProps = {
+  contentItems: ContentItem[];
+  images: ImageItem[];
   panelHeight: number;
   minTextboxHeight: number;
   layout: LayoutOption;
@@ -34,15 +72,24 @@ type PanelProps = {
   textboxes: TextboxItem[];
   title: string;
   onLayoutChange: (layout: LayoutOption) => void;
+  onAddImage: (image: ImageItem, insertAfterId: number | null) => void;
   onSectionSelect: (section: number) => void;
   onSubtitleChange: (subtitle: string) => void;
+  onImageChange: (
+    id: number,
+    updates: Partial<Pick<ImageItem, 'height' | 'width' | 'x' | 'y'>>
+  ) => void;
+  onImageInsertError: (message: string) => void;
+  onRegisterImageInsertHandler: (
+    handler: ((request: ImageInsertRequest) => Promise<boolean>) | null
+  ) => void;
   onTextboxChange: (id: number, text: string) => void;
-  onDeleteTextbox: (id: number) => void;
+  onDeleteContentItem: (id: number) => void;
   onTextboxHeightsChange: (heights: Record<number, number>) => void;
   onTitleChange: (title: string) => void;
   onAvailableHeightChange: (height: number) => void;
   onSectionUsageChange: (usage: Record<number, number>) => void;
-  onMoveTextbox: (
+  onMoveContentItem: (
     draggedId: number,
     targetSection: number,
     targetId: number | null,
@@ -66,6 +113,185 @@ const getSectionCount = (layout: LayoutOption) => {
 
   return 1;
 };
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
+const SUPPORTED_IMAGE_EXTENSION_PATTERN = /\.(gif|jpe?g|png|webp)$/i;
+const DEFAULT_IMAGE_MAX_WIDTH_RATIO = 0.62;
+const DEFAULT_IMAGE_MAX_HEIGHT_RATIO = 0.52;
+const DEFAULT_IMAGE_OFFSET_STEP = 18;
+const MAX_IMAGE_INSERT_OFFSET = 72;
+const MIN_IMAGE_WIDTH = 120;
+const MIN_IMAGE_HEIGHT = 72;
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
+
+const isSupportedImageFile = (file: File) =>
+  SUPPORTED_IMAGE_MIME_TYPES.has(file.type) ||
+  SUPPORTED_IMAGE_EXTENSION_PATTERN.test(file.name);
+
+const getImageWrapperHeight = (image: Pick<ImageItem, 'height'>) =>
+  Math.ceil(image.height);
+
+const clampImageFrameToSlot = (
+  image: Pick<ImageItem, 'aspectRatio' | 'height' | 'width' | 'x' | 'y'>,
+  sectionWidth: number,
+  availableHeight: number
+) => {
+  const safeSectionWidth = Math.max(sectionWidth, 1);
+  const safeAvailableHeight = Math.max(availableHeight, 1);
+  const aspectRatio = image.aspectRatio > 0 ? image.aspectRatio : 1;
+  const maxWidth = safeSectionWidth;
+  const maxHeight = safeAvailableHeight;
+  const minWidth = Math.min(
+    maxWidth,
+    Math.max(MIN_IMAGE_WIDTH, MIN_IMAGE_HEIGHT * aspectRatio)
+  );
+  const minHeight = Math.min(
+    maxHeight,
+    Math.max(MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH / aspectRatio)
+  );
+
+  let nextWidth = image.width;
+  let nextHeight = image.height;
+
+  if (nextWidth > maxWidth) {
+    nextWidth = maxWidth;
+    nextHeight = nextWidth / aspectRatio;
+  }
+
+  if (nextHeight > maxHeight) {
+    nextHeight = maxHeight;
+    nextWidth = nextHeight * aspectRatio;
+  }
+
+  if (nextWidth < minWidth) {
+    nextWidth = minWidth;
+    nextHeight = nextWidth / aspectRatio;
+  }
+
+  if (nextHeight < minHeight) {
+    nextHeight = minHeight;
+    nextWidth = nextHeight * aspectRatio;
+  }
+
+  if (nextWidth > maxWidth) {
+    nextWidth = maxWidth;
+    nextHeight = nextWidth / aspectRatio;
+  }
+
+  if (nextHeight > maxHeight) {
+    nextHeight = maxHeight;
+    nextWidth = nextHeight * aspectRatio;
+  }
+
+  const maxX = Math.max(0, safeSectionWidth - nextWidth);
+
+  return {
+    height: Math.round(nextHeight),
+    width: Math.round(nextWidth),
+    x: Math.round(clamp(image.x, 0, maxX)),
+    y: 0,
+  };
+};
+
+const getDefaultImageFrame = ({
+  aspectRatio,
+  imageCount,
+  naturalHeight,
+  naturalWidth,
+  sectionHeight,
+  sectionWidth,
+}: {
+  aspectRatio: number;
+  imageCount: number;
+  naturalHeight: number;
+  naturalWidth: number;
+  sectionHeight: number;
+  sectionWidth: number;
+}) => {
+  const preferredWidth = Math.min(
+    naturalWidth,
+    sectionWidth * DEFAULT_IMAGE_MAX_WIDTH_RATIO,
+    sectionWidth
+  );
+  const preferredHeight = Math.min(
+    naturalHeight,
+    sectionHeight * DEFAULT_IMAGE_MAX_HEIGHT_RATIO,
+    sectionHeight
+  );
+  let width = preferredWidth;
+  let height = width / aspectRatio;
+
+  if (height > preferredHeight) {
+    height = preferredHeight;
+    width = height * aspectRatio;
+  }
+
+  const offset = Math.min(imageCount * DEFAULT_IMAGE_OFFSET_STEP, MAX_IMAGE_INSERT_OFFSET);
+
+  return clampImageFrameToSlot(
+    {
+      aspectRatio,
+      height,
+      width,
+      x: (sectionWidth - width) / 2 + offset,
+      y: 0,
+    },
+    sectionWidth,
+    sectionHeight
+  );
+};
+
+const loadImageFile = (file: File) =>
+  new Promise<{
+    aspectRatio: number;
+    naturalHeight: number;
+    naturalWidth: number;
+    src: string;
+  }>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onerror = () => {
+      reject(new Error('The selected image could not be read.'));
+    };
+
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('The selected image could not be read.'));
+        return;
+      }
+
+      const src = reader.result;
+      const image = new Image();
+
+      image.onerror = () => {
+        reject(new Error('The selected image could not be loaded.'));
+      };
+
+      image.onload = () => {
+        const naturalWidth = Math.max(image.naturalWidth, 1);
+        const naturalHeight = Math.max(image.naturalHeight, 1);
+
+        resolve({
+          aspectRatio: naturalWidth / naturalHeight,
+          naturalHeight,
+          naturalWidth,
+          src,
+        });
+      };
+
+      image.src = src;
+    };
+
+    reader.readAsDataURL(file);
+  });
 
 const SEMANTIC_COLORS: Record<
   SemanticTextStyle,
@@ -260,6 +486,8 @@ const applyFragmentToCurrentSelection = (
 };
 
 export default function Panel({
+  contentItems,
+  images,
   panelHeight,
   minTextboxHeight,
   layout,
@@ -267,16 +495,20 @@ export default function Panel({
   subtitle,
   textboxes,
   title,
+  onAddImage,
   onLayoutChange,
   onSectionSelect,
   onSubtitleChange,
+  onImageChange,
+  onImageInsertError,
+  onRegisterImageInsertHandler,
   onTextboxChange,
-  onDeleteTextbox,
+  onDeleteContentItem,
   onTextboxHeightsChange,
   onTitleChange,
   onAvailableHeightChange,
   onSectionUsageChange,
-  onMoveTextbox,
+  onMoveContentItem,
   onOverflow,
   onRegisterTextToolbarActionHandler,
   onTextToolbarStateChange,
@@ -289,33 +521,69 @@ export default function Panel({
   const activeTextboxIdRef = useRef<number | null>(null);
   const savedSelectionRef = useRef<Range | null>(null);
   const textToolbarStateRef = useRef<TextToolbarState>(INITIAL_TEXT_TOOLBAR_STATE);
-  const [draggedTextboxId, setDraggedTextboxId] = useState<number | null>(null);
+  const [selectedImageId, setSelectedImageId] = useState<number | null>(null);
+  const [imageInteraction, setImageInteraction] = useState<ImageInteraction | null>(
+    null
+  );
+  const [draggedContentItemId, setDraggedContentItemId] = useState<number | null>(
+    null
+  );
   const [dropTarget, setDropTarget] = useState<
     | {
         type: 'section';
         section: number;
       }
     | {
-        type: 'textbox';
+        type: 'item';
         id: number;
         position: 'before' | 'after';
         section: number;
       }
     | null
   >(null);
-  const [hoveredTextboxId, setHoveredTextboxId] = useState<number | null>(null);
+  const [hoveredContentItemId, setHoveredContentItemId] = useState<number | null>(
+    null
+  );
   const [menuPosition, setMenuPosition] = useState<{ top: number; right: number } | null>(
     null
   );
 
   const sectionCount = useMemo(() => getSectionCount(layout), [layout]);
-  const activeHoveredTextboxId = useMemo(
+  const panelItemLookup = useMemo(() => {
+    const nextLookup = new Map<number, PanelItem>();
+
+    textboxes.forEach((textbox) => {
+      nextLookup.set(textbox.id, textbox);
+    });
+
+    images.forEach((image) => {
+      nextLookup.set(image.id, image);
+    });
+
+    return nextLookup;
+  }, [images, textboxes]);
+  const sectionContentItems = useMemo(
     () =>
-      hoveredTextboxId !== null &&
-      textboxes.some((textbox) => textbox.id === hoveredTextboxId)
-        ? hoveredTextboxId
-        : null,
-    [hoveredTextboxId, textboxes]
+      Array.from({ length: sectionCount }, (_, sectionIndex) =>
+        contentItems.filter((item) => item.section === sectionIndex)
+      ),
+    [contentItems, sectionCount]
+  );
+  const sectionPanelItems = useMemo(
+    () =>
+      sectionContentItems.map((itemsInSection) =>
+        itemsInSection
+          .map((item) => panelItemLookup.get(item.id))
+          .filter((item): item is PanelItem => item !== undefined)
+      ),
+    [panelItemLookup, sectionContentItems]
+  );
+  const activeActionContentItem = useMemo(
+    () =>
+      contentItems.find((item) => item.id === hoveredContentItemId) ??
+      contentItems.find((item) => item.id === selectedImageId) ??
+      null,
+    [contentItems, hoveredContentItemId, selectedImageId]
   );
 
   const setTextToolbarState = useCallback(
@@ -331,6 +599,58 @@ export default function Panel({
     savedSelectionRef.current = null;
     setTextToolbarState(INITIAL_TEXT_TOOLBAR_STATE);
   }, [setTextToolbarState]);
+
+  const getContentItemFlowHeight = useCallback(
+    (item: ContentItem) => {
+      const wrapper = wrapperRefs.current[item.id];
+
+      if (wrapper) {
+        return wrapper.offsetHeight;
+      }
+
+      if (item.type === 'textbox') {
+        const editor = textboxRefs.current[item.id];
+        return editor?.offsetHeight ?? minTextboxHeight;
+      }
+
+      const image = panelItemLookup.get(item.id);
+
+      if (!image || image.type !== 'image') {
+        return 0;
+      }
+
+      return getImageWrapperHeight(image);
+    },
+    [minTextboxHeight, panelItemLookup]
+  );
+
+  const getAvailableHeightForContentSlot = useCallback(
+    (
+      sectionIndex: number,
+      _slotIndex: number,
+      excludedItemId: number | null = null
+    ) => {
+      const section = sectionRefs.current[sectionIndex];
+      const itemsInSection = sectionContentItems[sectionIndex] ?? [];
+
+      if (!section) {
+        return 0;
+      }
+
+      let usedHeight = 0;
+
+      itemsInSection.forEach((item) => {
+        if (item.id === excludedItemId) {
+          return;
+        }
+
+        usedHeight += getContentItemFlowHeight(item);
+      });
+
+      return Math.max(0, section.clientHeight - usedHeight);
+    },
+    [getContentItemFlowHeight, sectionContentItems]
+  );
 
   const measureTextboxHeight = useCallback(
     (element: HTMLDivElement) => {
@@ -379,12 +699,12 @@ export default function Panel({
 
       const sectionRect = section.getBoundingClientRect();
 
-      return textboxes.reduce((maxBottom, textbox) => {
-        if (textbox.section !== sectionIndex) {
+      return contentItems.reduce((maxBottom, item) => {
+        if (item.section !== sectionIndex) {
           return maxBottom;
         }
 
-        const wrapper = wrapperRefs.current[textbox.id];
+        const wrapper = wrapperRefs.current[item.id];
 
         if (!wrapper) {
           return maxBottom;
@@ -402,7 +722,7 @@ export default function Panel({
       },
       {}
     );
-  }, [sectionCount, textboxes]);
+  }, [contentItems, sectionCount]);
 
   const getAvailableHeight = useCallback(
     (sectionIndex: number) =>
@@ -803,6 +1123,40 @@ export default function Panel({
     textboxes,
   ]);
 
+  useLayoutEffect(() => {
+    images.forEach((image) => {
+      const section = sectionRefs.current[image.section];
+      const itemIndex = (sectionContentItems[image.section] ?? []).findIndex(
+        (item) => item.id === image.id
+      );
+
+      if (!section || itemIndex === -1) {
+        return;
+      }
+
+      const nextFrame = clampImageFrameToSlot(
+        image,
+        section.clientWidth,
+        getAvailableHeightForContentSlot(image.section, itemIndex, image.id)
+      );
+
+      if (
+        nextFrame.x !== image.x ||
+        nextFrame.y !== image.y ||
+        nextFrame.width !== image.width ||
+        nextFrame.height !== image.height
+      ) {
+        onImageChange(image.id, nextFrame);
+      }
+    });
+  }, [
+    getAvailableHeightForContentSlot,
+    images,
+    layout,
+    onImageChange,
+    sectionContentItems,
+  ]);
+
   useEffect(() => {
     const firstSection = sectionRefs.current[0];
 
@@ -871,10 +1225,15 @@ export default function Panel({
         window.clearTimeout(closeMenuTimeoutRef.current);
       }
 
+      onRegisterImageInsertHandler(null);
       onRegisterTextToolbarActionHandler(null);
       onTextToolbarStateChange(INITIAL_TEXT_TOOLBAR_STATE);
     };
-  }, [onRegisterTextToolbarActionHandler, onTextToolbarStateChange]);
+  }, [
+    onRegisterImageInsertHandler,
+    onRegisterTextToolbarActionHandler,
+    onTextToolbarStateChange,
+  ]);
 
   const updateMenuPosition = useCallback((id: number) => {
     const wrapper = wrapperRefs.current[id];
@@ -891,13 +1250,13 @@ export default function Panel({
   }, []);
 
   useEffect(() => {
-    if (activeHoveredTextboxId === null) {
+    if (activeActionContentItem === null) {
       return undefined;
     }
 
-    updateMenuPosition(activeHoveredTextboxId);
+    updateMenuPosition(activeActionContentItem.id);
 
-    const handleViewportChange = () => updateMenuPosition(activeHoveredTextboxId);
+    const handleViewportChange = () => updateMenuPosition(activeActionContentItem.id);
 
     window.addEventListener('resize', handleViewportChange);
     window.addEventListener('scroll', handleViewportChange, true);
@@ -906,18 +1265,24 @@ export default function Panel({
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('scroll', handleViewportChange, true);
     };
-  }, [activeHoveredTextboxId, updateMenuPosition]);
+  }, [activeActionContentItem, contentItems, images, textboxes, updateMenuPosition]);
 
   const handleDragStart = (id: number) => {
-    setDraggedTextboxId(id);
+    setDraggedContentItemId(id);
     setDropTarget(null);
+
+    if (panelItemLookup.get(id)?.type === 'image') {
+      setSelectedImageId(id);
+    } else {
+      setSelectedImageId(null);
+    }
   };
 
   const handleDragOver = (
     event: React.DragEvent<HTMLDivElement>,
-    targetTextbox: TextboxItem
+    targetItem: ContentPanelItem
   ) => {
-    if (draggedTextboxId === null || draggedTextboxId === targetTextbox.id) {
+    if (draggedContentItemId === null || draggedContentItemId === targetItem.id) {
       return;
     }
 
@@ -926,37 +1291,37 @@ export default function Panel({
     const { top, height } = event.currentTarget.getBoundingClientRect();
     const position = event.clientY < top + height / 2 ? 'before' : 'after';
     setDropTarget({
-      type: 'textbox',
-      id: targetTextbox.id,
+      type: 'item',
+      id: targetItem.id,
       position,
-      section: targetTextbox.section,
+      section: targetItem.section,
     });
   };
 
   const handleDrop = (
     event: React.DragEvent<HTMLDivElement>,
-    targetTextbox: TextboxItem
+    targetItem: ContentPanelItem
   ) => {
     if (
-      draggedTextboxId === null ||
-      draggedTextboxId === targetTextbox.id ||
+      draggedContentItemId === null ||
+      draggedContentItemId === targetItem.id ||
       dropTarget === null ||
-      dropTarget.type !== 'textbox'
+      dropTarget.type !== 'item'
     ) {
-      setDraggedTextboxId(null);
+      setDraggedContentItemId(null);
       setDropTarget(null);
       return;
     }
 
     event.preventDefault();
     event.stopPropagation();
-    onMoveTextbox(
-      draggedTextboxId,
+    onMoveContentItem(
+      draggedContentItemId,
       dropTarget.section,
-      targetTextbox.id,
+      targetItem.id,
       dropTarget.position
     );
-    setDraggedTextboxId(null);
+    setDraggedContentItemId(null);
     setDropTarget(null);
   };
 
@@ -964,7 +1329,7 @@ export default function Panel({
     event: React.DragEvent<HTMLDivElement>,
     sectionIndex: number
   ) => {
-    if (draggedTextboxId === null) {
+    if (draggedContentItemId === null) {
       return;
     }
 
@@ -976,33 +1341,33 @@ export default function Panel({
     event: React.DragEvent<HTMLDivElement>,
     sectionIndex: number
   ) => {
-    if (draggedTextboxId === null) {
+    if (draggedContentItemId === null) {
       return;
     }
 
     event.preventDefault();
 
-    if (dropTarget !== null && dropTarget.type === 'textbox') {
+    if (dropTarget !== null && dropTarget.type === 'item') {
       return;
     }
 
-    onMoveTextbox(draggedTextboxId, sectionIndex, null, 'after');
-    setDraggedTextboxId(null);
+    onMoveContentItem(draggedContentItemId, sectionIndex, null, 'after');
+    setDraggedContentItemId(null);
     setDropTarget(null);
   };
 
   const handleDragEnd = () => {
-    setDraggedTextboxId(null);
+    setDraggedContentItemId(null);
     setDropTarget(null);
   };
 
-  const handleTextboxMouseEnter = (id: number) => {
+  const handleContentItemMouseEnter = (id: number) => {
     if (closeMenuTimeoutRef.current !== null) {
       window.clearTimeout(closeMenuTimeoutRef.current);
       closeMenuTimeoutRef.current = null;
     }
 
-    setHoveredTextboxId(id);
+    setHoveredContentItemId(id);
     updateMenuPosition(id);
   };
 
@@ -1012,13 +1377,80 @@ export default function Panel({
     }
 
     closeMenuTimeoutRef.current = window.setTimeout(() => {
-      setHoveredTextboxId(null);
+      setHoveredContentItemId(null);
       setMenuPosition(null);
       closeMenuTimeoutRef.current = null;
     }, 120);
   };
 
+  const dismissTextboxUi = useCallback(() => {
+    if (closeMenuTimeoutRef.current !== null) {
+      window.clearTimeout(closeMenuTimeoutRef.current);
+      closeMenuTimeoutRef.current = null;
+    }
+
+    setHoveredContentItemId(null);
+    setMenuPosition(null);
+    clearTextToolbarState();
+  }, [clearTextToolbarState]);
+
+  const startImageInteraction = useCallback(
+    (
+      event: React.MouseEvent<HTMLButtonElement | HTMLDivElement>,
+      image: ImageItem,
+      mode: ImageInteraction['mode']
+    ) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const section = sectionRefs.current[image.section];
+      const itemIndex = (sectionContentItems[image.section] ?? []).findIndex(
+        (item) => item.id === image.id
+      );
+
+      if (!section || itemIndex === -1) {
+        return;
+      }
+
+      dismissTextboxUi();
+      onSectionSelect(image.section);
+      setSelectedImageId(image.id);
+      setImageInteraction({
+        availableHeight: getAvailableHeightForContentSlot(
+          image.section,
+          itemIndex,
+          image.id
+        ),
+        aspectRatio: image.aspectRatio,
+        imageId: image.id,
+        mode,
+        originHeight: image.height,
+        originWidth: image.width,
+        originX: image.x,
+        originY: image.y,
+        sectionWidth: section.clientWidth,
+        startX: event.clientX,
+        startY: event.clientY,
+      });
+    },
+    [dismissTextboxUi, getAvailableHeightForContentSlot, onSectionSelect, sectionContentItems]
+  );
+
+  const handleImageMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>, image: ImageItem) => {
+      setHoveredContentItemId(image.id);
+      updateMenuPosition(image.id);
+      startImageInteraction(event, image, 'drag');
+    },
+    [startImageInteraction, updateMenuPosition]
+  );
+
   const handleTextboxFocus = (textboxId: number) => {
+    setSelectedImageId(null);
     activeTextboxIdRef.current = textboxId;
     updateTextToolbarStateFromSelection(textboxId);
   };
@@ -1079,9 +1511,277 @@ export default function Panel({
     commitTextboxContent(textbox);
   };
 
-  const sections = Array.from({ length: sectionCount }, (_, sectionIndex) =>
-    textboxes.filter((textbox) => textbox.section === sectionIndex)
+  const handleInsertImageRequest = useCallback(
+    async ({ file, id }: ImageInsertRequest) => {
+      if (!isSupportedImageFile(file)) {
+        onImageInsertError('Choose a PNG, JPG, JPEG, GIF, or WEBP image.');
+        return false;
+      }
+
+      const section = sectionRefs.current[selectedSection];
+
+      if (!section) {
+        onImageInsertError('Select a Learning Section before adding an image.');
+        return false;
+      }
+
+      try {
+        const itemsInSection = sectionContentItems[selectedSection] ?? [];
+        const anchorId = itemsInSection.some((item) => item.id === selectedImageId)
+          ? selectedImageId
+          : itemsInSection.some((item) => item.id === activeTextboxIdRef.current)
+            ? activeTextboxIdRef.current
+            : null;
+        const anchorIndex =
+          anchorId === null
+            ? -1
+            : itemsInSection.findIndex((item) => item.id === anchorId);
+        const insertIndex =
+          anchorIndex === -1 ? itemsInSection.length : anchorIndex + 1;
+        const availableHeight = getAvailableHeightForContentSlot(
+          selectedSection,
+          insertIndex,
+          null
+        );
+
+        if (availableHeight < MIN_IMAGE_HEIGHT) {
+          onImageInsertError(
+            "It's not possible to add more content to the current section."
+          );
+          return false;
+        }
+
+        const { aspectRatio, naturalHeight, naturalWidth, src } =
+          await loadImageFile(file);
+        const frame = getDefaultImageFrame({
+          aspectRatio,
+          imageCount: itemsInSection.filter((item) => item.type === 'image').length,
+          naturalHeight,
+          naturalWidth,
+          sectionHeight: availableHeight,
+          sectionWidth: section.clientWidth,
+        });
+
+        onAddImage(
+          createImagePanelItem({
+            altText: file.name,
+            aspectRatio,
+            height: frame.height,
+            id,
+            section: selectedSection,
+            src,
+            width: frame.width,
+            x: frame.x,
+            y: frame.y,
+          }),
+          anchorId
+        );
+        dismissTextboxUi();
+        onSectionSelect(selectedSection);
+        setSelectedImageId(id);
+        return true;
+      } catch {
+        onImageInsertError('The selected image could not be loaded.');
+        return false;
+      }
+    },
+    [
+      dismissTextboxUi,
+      getAvailableHeightForContentSlot,
+      onAddImage,
+      onImageInsertError,
+      onSectionSelect,
+      sectionContentItems,
+      selectedImageId,
+      selectedSection,
+    ]
   );
+
+  useEffect(() => {
+    onRegisterImageInsertHandler(handleInsertImageRequest);
+
+    return () => {
+      onRegisterImageInsertHandler(null);
+    };
+  }, [handleInsertImageRequest, onRegisterImageInsertHandler]);
+
+  useEffect(() => {
+    if (selectedImageId !== null && !images.some((image) => image.id === selectedImageId)) {
+      setSelectedImageId(null);
+    }
+  }, [images, selectedImageId]);
+
+  useEffect(() => {
+    if (!imageInteraction) {
+      return undefined;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (imageInteraction.mode === 'drag') {
+        const nextFrame = clampImageFrameToSlot(
+          {
+            aspectRatio: imageInteraction.aspectRatio,
+            height: imageInteraction.originHeight,
+            width: imageInteraction.originWidth,
+            x: imageInteraction.originX + (event.clientX - imageInteraction.startX),
+            y: 0,
+          },
+          imageInteraction.sectionWidth,
+          imageInteraction.availableHeight
+        );
+
+        onImageChange(imageInteraction.imageId, nextFrame);
+        return;
+      }
+
+      const widthFromHorizontalDrag =
+        imageInteraction.originWidth + (event.clientX - imageInteraction.startX);
+      const heightFromVerticalDrag =
+        imageInteraction.originHeight + (event.clientY - imageInteraction.startY);
+      const projectedWidth =
+        Math.abs(event.clientX - imageInteraction.startX) >=
+        Math.abs(event.clientY - imageInteraction.startY)
+          ? widthFromHorizontalDrag
+          : heightFromVerticalDrag * imageInteraction.aspectRatio;
+      const nextWidth = Math.max(projectedWidth, 1);
+      const nextHeight = nextWidth / imageInteraction.aspectRatio;
+      const nextFrame = clampImageFrameToSlot(
+        {
+          aspectRatio: imageInteraction.aspectRatio,
+          height: nextHeight,
+          width: nextWidth,
+          x: imageInteraction.originX,
+          y: 0,
+        },
+        imageInteraction.sectionWidth,
+        imageInteraction.availableHeight
+      );
+
+      onImageChange(imageInteraction.imageId, nextFrame);
+    };
+
+    const handleMouseUp = () => {
+      setImageInteraction(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [imageInteraction, onImageChange]);
+
+  // Textboxes keep their current flow-based sizing rules; future panel item types
+  // can plug into this dispatch point without replacing the textbox editor model.
+  const renderPanelItem = (item: PanelItem, index: number) => {
+    if (item.type === 'textbox') {
+      const dropIndicator =
+        dropTarget?.type === 'item' && dropTarget.id === item.id
+          ? dropTarget.position
+          : null;
+
+      return (
+        <PanelItemShell
+          key={item.id}
+          item={createPanelItemShellState(
+            item,
+            textToolbarStateRef.current.textboxId === item.id &&
+              textToolbarStateRef.current.visible
+          )}
+          itemRef={(element) => {
+            wrapperRefs.current[item.id] = element;
+          }}
+          dropIndicator={dropIndicator}
+          onDragOver={(event) => handleDragOver(event, item)}
+          onDrop={(event) => handleDrop(event, item)}
+          onMouseEnter={() => handleContentItemMouseEnter(item.id)}
+          onMouseLeave={scheduleMenuClose}
+        >
+          <div
+            ref={(element) => {
+              textboxRefs.current[item.id] = element;
+            }}
+            contentEditable
+            suppressContentEditableWarning
+            role="textbox"
+            aria-multiline="true"
+            spellCheck
+            data-empty={item.text === '' ? 'true' : 'false'}
+            data-placeholder={`Textbox ${index + 1}`}
+            onFocus={() => handleTextboxFocus(item.id)}
+            onBlur={() => handleTextboxBlur(item.id)}
+            onInput={() => handleTextboxInput(item)}
+            onPaste={(event) => handleTextboxPaste(event, item)}
+            onKeyUp={() => updateTextToolbarStateFromSelection(item.id)}
+            onMouseUp={() => updateTextToolbarStateFromSelection(item.id)}
+            className="textbox-editor w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
+          />
+        </PanelItemShell>
+      );
+    }
+
+    if (item.type === 'image') {
+      const isSelected = selectedImageId === item.id;
+      const wrapperHeight = getImageWrapperHeight(item);
+      const dropIndicator =
+        dropTarget?.type === 'item' && dropTarget.id === item.id
+          ? dropTarget.position
+          : null;
+
+      return (
+        <PanelItemShell
+          key={item.id}
+          item={createPanelItemShellState(item, isSelected)}
+          itemRef={(element) => {
+            wrapperRefs.current[item.id] = element;
+          }}
+          dropIndicator={dropIndicator}
+          onDragOver={(event) => handleDragOver(event, item)}
+          onDrop={(event) => handleDrop(event, item)}
+          onMouseEnter={() => handleContentItemMouseEnter(item.id)}
+          onMouseLeave={scheduleMenuClose}
+          className="relative"
+          style={{ height: `${wrapperHeight}px` }}
+        >
+          <div
+            onMouseDown={(event) => handleImageMouseDown(event, item)}
+            className={`absolute overflow-hidden border bg-white/95 transition-[border-color,box-shadow,transform] duration-200 ease-out ${
+              isSelected
+                ? 'border-sky-300 shadow-[0_24px_50px_-30px_rgba(14,165,233,0.42)] ring-2 ring-sky-200/70'
+                : 'border-slate-200/80 shadow-[0_18px_40px_-32px_rgba(15,23,42,0.35)] hover:border-slate-300'
+            } cursor-grab active:cursor-grabbing`}
+            style={{
+              height: `${item.height}px`,
+              left: `${item.x}px`,
+              top: '0px',
+              width: `${item.width}px`,
+              zIndex: item.zIndex,
+            }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={item.src}
+              alt={item.altText}
+              draggable={false}
+              className="pointer-events-none h-full w-full select-none object-contain"
+            />
+            {isSelected ? (
+              <button
+                type="button"
+                aria-label="Resize image"
+                onMouseDown={(event) => startImageInteraction(event, item, 'resize')}
+                className="absolute bottom-2 right-2 h-4 w-4 cursor-se-resize rounded-[5px] border border-sky-300 bg-white/95 shadow-[0_10px_24px_-18px_rgba(14,165,233,0.65)]"
+              />
+            ) : null}
+          </div>
+        </PanelItemShell>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <>
@@ -1099,6 +1799,7 @@ export default function Panel({
                 <input
                   type="text"
                   value={title}
+                  onFocus={() => setSelectedImageId(null)}
                   onChange={(event) => onTitleChange(event.target.value)}
                   placeholder="Section title"
                   className="h-12 w-full border-none bg-transparent text-3xl font-semibold text-slate-900 outline-none placeholder:text-slate-400"
@@ -1106,6 +1807,7 @@ export default function Panel({
                 <input
                   type="text"
                   value={subtitle}
+                  onFocus={() => setSelectedImageId(null)}
                   onChange={(event) => onSubtitleChange(event.target.value)}
                   placeholder="Section subtitle"
                   className="h-8 w-full border-none bg-transparent text-lg text-slate-500 outline-none placeholder:text-slate-400"
@@ -1113,68 +1815,30 @@ export default function Panel({
               </div>
             </div>
             <div className="relative flex flex-1 min-h-0">
-              {sections.map((sectionTextboxes, sectionIndex) => (
+              {sectionPanelItems.map((itemsInSection, sectionIndex) => (
                 <div
                   key={sectionIndex}
                   ref={(element) => {
                     sectionRefs.current[sectionIndex] = element;
                   }}
-                  onMouseDown={() => onSectionSelect(sectionIndex)}
+                  onMouseDown={(event) => {
+                    onSectionSelect(sectionIndex);
+
+                    if (event.target === event.currentTarget) {
+                      setSelectedImageId(null);
+                    }
+                  }}
                   onDragOver={(event) => handleSectionDragOver(event, sectionIndex)}
                   onDrop={(event) => handleSectionDrop(event, sectionIndex)}
-                  className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden transition-[background-color,box-shadow] duration-200 ease-out ${
+                  className={`relative flex h-full min-h-0 flex-1 flex-col overflow-hidden transition-[background-color,box-shadow] duration-200 ease-out ${
                     sectionIndex > 0 ? 'border-l border-slate-200/80' : ''
                   } ${
                     selectedSection === sectionIndex
                       ? 'bg-sky-50/45 shadow-[inset_0_0_0_2px_rgba(125,211,252,0.7)]'
                       : 'bg-white'
-                  }`}
+                   }`}
                 >
-                  {sectionTextboxes.map((textbox, index) => (
-                    <div
-                      key={textbox.id}
-                      ref={(element) => {
-                        wrapperRefs.current[textbox.id] = element;
-                      }}
-                      onDragOver={(event) => handleDragOver(event, textbox)}
-                      onDrop={(event) => handleDrop(event, textbox)}
-                      onMouseEnter={() => handleTextboxMouseEnter(textbox.id)}
-                      onMouseLeave={scheduleMenuClose}
-                      className={`relative ${
-                        dropTarget?.type === 'textbox' &&
-                        dropTarget.id === textbox.id &&
-                        dropTarget.position === 'before'
-                          ? 'border-t-4 border-t-blue-500'
-                          : ''
-                      } ${
-                        dropTarget?.type === 'textbox' &&
-                        dropTarget.id === textbox.id &&
-                        dropTarget.position === 'after'
-                          ? 'border-b-4 border-b-blue-500'
-                          : ''
-                      }`}
-                    >
-                      <div
-                        ref={(element) => {
-                          textboxRefs.current[textbox.id] = element;
-                        }}
-                        contentEditable
-                        suppressContentEditableWarning
-                        role="textbox"
-                        aria-multiline="true"
-                        spellCheck
-                        data-empty={textbox.text === '' ? 'true' : 'false'}
-                        data-placeholder={`Textbox ${index + 1}`}
-                        onFocus={() => handleTextboxFocus(textbox.id)}
-                        onBlur={() => handleTextboxBlur(textbox.id)}
-                        onInput={() => handleTextboxInput(textbox)}
-                        onPaste={(event) => handleTextboxPaste(event, textbox)}
-                        onKeyUp={() => updateTextToolbarStateFromSelection(textbox.id)}
-                        onMouseUp={() => updateTextToolbarStateFromSelection(textbox.id)}
-                        className="textbox-editor w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
-                      />
-                    </div>
-                  ))}
+                  {itemsInSection.map((item, index) => renderPanelItem(item, index))}
                   {dropTarget?.type === 'section' &&
                   dropTarget.section === sectionIndex ? (
                     <div className="mt-auto border-b-4 border-b-blue-500" />
@@ -1185,7 +1849,7 @@ export default function Panel({
           </div>
         </div>
       </div>
-      {activeHoveredTextboxId !== null && menuPosition !== null
+      {activeActionContentItem !== null && menuPosition !== null
         ? createPortal(
             <div
               className="fixed z-30 -translate-y-full pt-2"
@@ -1205,7 +1869,7 @@ export default function Panel({
                 <button
                   type="button"
                   draggable
-                  onDragStart={() => handleDragStart(activeHoveredTextboxId)}
+                  onDragStart={() => handleDragStart(activeActionContentItem.id)}
                   onDragEnd={handleDragEnd}
                   className="cursor-grab rounded-lg border border-slate-200/80 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors duration-200 hover:bg-slate-50 active:cursor-grabbing"
                 >
@@ -1214,12 +1878,19 @@ export default function Panel({
                 <button
                   type="button"
                   onClick={() => {
-                    onDeleteTextbox(activeHoveredTextboxId);
-                    setHoveredTextboxId(null);
+                    onDeleteContentItem(activeActionContentItem.id);
+                    setHoveredContentItemId(null);
+                    if (activeActionContentItem.type === 'image') {
+                      setSelectedImageId(null);
+                    }
                     setMenuPosition(null);
                   }}
                   className="rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors duration-200 hover:bg-red-50"
-                  aria-label="Delete textbox"
+                  aria-label={
+                    activeActionContentItem.type === 'image'
+                      ? 'Delete image'
+                      : 'Delete textbox'
+                  }
                 >
                   Trash
                 </button>

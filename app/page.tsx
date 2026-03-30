@@ -6,6 +6,14 @@ import Sidebar from '../components/Sidebar';
 import Panel from '../components/Panel';
 import LearningMetadataEditor from '../components/LearningMetadataEditor';
 import {
+  createPanelContentItem,
+  createTextboxPanelItem,
+  type ImageInsertRequest,
+  type ImagePanelItem,
+  type PanelContentItem,
+  type TextboxPanelItem,
+} from '../components/panelItemTypes';
+import {
   INITIAL_TEXT_TOOLBAR_STATE,
   type TextToolbarAction,
   type TextToolbarState,
@@ -14,20 +22,16 @@ import {
 type LayoutOption = 'blank' | 'split' | 'thirds';
 type NodeType = 'object' | 'subobject' | 'section';
 
-type TextboxItem = {
-  id: number;
-  text: string;
-  section: number;
-};
-
 type LearningSectionItem = {
+  contentItems: PanelContentItem[];
+  images: ImagePanelItem[];
   id: number;
   layout: LayoutOption;
   parentId: number;
   parentType: 'object' | 'subobject';
   selectedSection: number;
   subtitle: string;
-  textboxes: TextboxItem[];
+  textboxes: TextboxPanelItem[];
   title: string;
   type: 'section';
 };
@@ -124,6 +128,8 @@ const createLearningSection = (
   parentId: number,
   parentType: LearningSectionItem['parentType']
 ): LearningSectionItem => ({
+  contentItems: [],
+  images: [],
   id,
   layout: 'blank',
   parentId,
@@ -185,6 +191,29 @@ const insertAfterId = <T extends { id: number }>(
     nextItem,
     ...items.slice(targetIndex + 1),
   ];
+};
+
+const getSectionContentInsertIndex = (
+  items: PanelContentItem[],
+  sectionIndex: number,
+  targetId: number | null
+) => {
+  if (targetId !== null) {
+    const targetIndex = items.findIndex(
+      (item) => item.id === targetId && item.section === sectionIndex
+    );
+
+    if (targetIndex !== -1) {
+      return targetIndex + 1;
+    }
+  }
+
+  const lastIndexInSection = items.reduce(
+    (lastIndex, item, index) => (item.section === sectionIndex ? index : lastIndex),
+    -1
+  );
+
+  return lastIndexInSection === -1 ? items.length : lastIndexInSection + 1;
 };
 
 const findSelectionContext = (
@@ -249,6 +278,9 @@ export default function Home() {
     INITIAL_TEXT_TOOLBAR_STATE
   );
   const objectsRef = useRef(objects);
+  const imageInsertHandlerRef = useRef<
+    ((request: ImageInsertRequest) => Promise<boolean>) | null
+  >(null);
   const textToolbarActionHandlerRef = useRef<
     ((action: TextToolbarAction) => void) | null
   >(null);
@@ -562,18 +594,52 @@ export default function Home() {
 
     const nextTextboxId = getNextId();
 
-    updateSection(selectedSection.id, (section) => ({
-      ...section,
-      textboxes: [
-        ...section.textboxes,
-        {
-          id: nextTextboxId,
-          text: '',
-          section: section.selectedSection,
-        },
-      ],
-    }));
+    updateSection(selectedSection.id, (section) => {
+      const nextTextbox = createTextboxPanelItem(
+        nextTextboxId,
+        section.selectedSection
+      );
+      const nextContentItems = [...section.contentItems];
+
+      nextContentItems.splice(
+        getSectionContentInsertIndex(
+          section.contentItems,
+          section.selectedSection,
+          null
+        ),
+        0,
+        createPanelContentItem(nextTextboxId, 'textbox', section.selectedSection)
+      );
+
+      return {
+        ...section,
+        contentItems: nextContentItems,
+        textboxes: [...section.textboxes, nextTextbox],
+      };
+    });
   }, [getNextId, selectedSection, updateSection]);
+
+  const handleAddImage = useCallback(
+    async (file: File) => {
+      if (!selectedSection) {
+        setNotification('Select a Learning Section before adding an image.');
+        return;
+      }
+
+      const insertImage = imageInsertHandlerRef.current;
+
+      if (!insertImage) {
+        setNotification('Select a Learning Section before adding an image.');
+        return;
+      }
+
+      await insertImage({
+        file,
+        id: getNextId(),
+      });
+    },
+    [getNextId, selectedSection]
+  );
 
   const handleTextboxChange = useCallback(
     (id: number, text: string) => {
@@ -585,6 +651,54 @@ export default function Home() {
         ...section,
         textboxes: section.textboxes.map((textbox) =>
           textbox.id === id ? { ...textbox, text } : textbox
+        ),
+      }));
+    },
+    [selectedSection, updateSection]
+  );
+
+  const handleAddImageItem = useCallback(
+    (nextImage: ImagePanelItem, insertAfterId: number | null) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      updateSection(selectedSection.id, (section) => {
+        const nextContentItems = [...section.contentItems];
+
+        nextContentItems.splice(
+          getSectionContentInsertIndex(
+            section.contentItems,
+            nextImage.section,
+            insertAfterId
+          ),
+          0,
+          createPanelContentItem(nextImage.id, 'image', nextImage.section)
+        );
+
+        return {
+          ...section,
+          contentItems: nextContentItems,
+          images: [...section.images, nextImage],
+        };
+      });
+    },
+    [selectedSection, updateSection]
+  );
+
+  const handleImageChange = useCallback(
+    (
+      id: number,
+      updates: Partial<Pick<ImagePanelItem, 'height' | 'width' | 'x' | 'y'>>
+    ) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      updateSection(selectedSection.id, (section) => ({
+        ...section,
+        images: section.images.map((image) =>
+          image.id === id ? { ...image, ...updates } : image
         ),
       }));
     },
@@ -619,32 +733,48 @@ export default function Home() {
     [selectedSection, updateSection]
   );
 
-  const handleDeleteTextbox = useCallback(
+  const handleDeleteContentItem = useCallback(
     (id: number) => {
       if (!selectedSection) {
         return;
       }
 
+      const itemToDelete = selectedSection.contentItems.find((item) => item.id === id);
+
+      if (!itemToDelete) {
+        return;
+      }
+
       updateSection(selectedSection.id, (section) => ({
         ...section,
-        textboxes: section.textboxes.filter((textbox) => textbox.id !== id),
+        contentItems: section.contentItems.filter((item) => item.id !== id),
+        images:
+          itemToDelete.type === 'image'
+            ? section.images.filter((image) => image.id !== id)
+            : section.images,
+        textboxes:
+          itemToDelete.type === 'textbox'
+            ? section.textboxes.filter((textbox) => textbox.id !== id)
+            : section.textboxes,
       }));
 
-      const currentPanelHeights =
-        panelTextboxHeightsRef.current[selectedSection.id] ?? {};
-      const nextPanelHeights = { ...currentPanelHeights };
+      if (itemToDelete.type === 'textbox') {
+        const currentPanelHeights =
+          panelTextboxHeightsRef.current[selectedSection.id] ?? {};
+        const nextPanelHeights = { ...currentPanelHeights };
 
-      delete nextPanelHeights[id];
+        delete nextPanelHeights[id];
 
-      panelTextboxHeightsRef.current = {
-        ...panelTextboxHeightsRef.current,
-        [selectedSection.id]: nextPanelHeights,
-      };
+        panelTextboxHeightsRef.current = {
+          ...panelTextboxHeightsRef.current,
+          [selectedSection.id]: nextPanelHeights,
+        };
+      }
     },
     [selectedSection, updateSection]
   );
 
-  const handleMoveTextbox = useCallback(
+  const handleMoveContentItem = useCallback(
     (
       draggedId: number,
       targetSection: number,
@@ -655,76 +785,75 @@ export default function Home() {
         return;
       }
 
-      const draggedTextbox = selectedSection.textboxes.find(
-        (textbox) => textbox.id === draggedId
+      const draggedContentItem = selectedSection.contentItems.find(
+        (item) => item.id === draggedId
       );
 
-      if (!draggedTextbox) {
+      if (!draggedContentItem) {
         return;
       }
 
-      const currentHeights = panelTextboxHeightsRef.current[selectedSection.id] ?? {};
-      const draggedHeight = currentHeights[draggedId] ?? MIN_TEXTBOX_HEIGHT;
-      const targetHeight = sectionUsageHeightsRef.current[targetSection] ?? 0;
+      if (draggedContentItem.type === 'textbox') {
+        const draggedTextbox = selectedSection.textboxes.find(
+          (textbox) => textbox.id === draggedId
+        );
 
-      if (
-        draggedTextbox.section !== targetSection &&
-        targetHeight + draggedHeight > availablePanelHeightRef.current
-      ) {
-        setNotification(OVERFLOW_MESSAGE);
-        return;
+        if (!draggedTextbox) {
+          return;
+        }
+
+        const currentHeights =
+          panelTextboxHeightsRef.current[selectedSection.id] ?? {};
+        const draggedHeight = currentHeights[draggedId] ?? MIN_TEXTBOX_HEIGHT;
+        const targetHeight = sectionUsageHeightsRef.current[targetSection] ?? 0;
+
+        if (
+          draggedTextbox.section !== targetSection &&
+          targetHeight + draggedHeight > availablePanelHeightRef.current
+        ) {
+          setNotification(OVERFLOW_MESSAGE);
+          return;
+        }
       }
 
       updateSection(selectedSection.id, (section) => {
-        const draggedIndex = section.textboxes.findIndex(
-          (textbox) => textbox.id === draggedId
+        const draggedIndex = section.contentItems.findIndex(
+          (item) => item.id === draggedId
         );
 
         if (draggedIndex === -1) {
           return section;
         }
 
-        const nextTextboxes = [...section.textboxes];
-        const [draggedItem] = nextTextboxes.splice(draggedIndex, 1);
-        const movedTextbox = { ...draggedItem, section: targetSection };
-
-        if (targetId === null) {
-          const lastIndexInSection = nextTextboxes.reduce(
-            (lastIndex, textbox, index) =>
-              textbox.section === targetSection ? index : lastIndex,
-            -1
-          );
-
-          const insertIndex =
-            lastIndexInSection === -1 ? nextTextboxes.length : lastIndexInSection + 1;
-
-          nextTextboxes.splice(insertIndex, 0, movedTextbox);
-
-          return {
-            ...section,
-            textboxes: nextTextboxes,
-          };
-        }
-
-        const adjustedTargetIndex = nextTextboxes.findIndex(
-          (textbox) => textbox.id === targetId
+        const nextContentItems = section.contentItems.filter(
+          (item) => item.id !== draggedId
         );
-
-        if (adjustedTargetIndex === -1) {
-          return {
-            ...section,
-            textboxes: [...nextTextboxes, movedTextbox],
-          };
-        }
-
+        const movedContentItem = {
+          ...section.contentItems[draggedIndex],
+          section: targetSection,
+        };
+        const targetIndex =
+          targetId === null
+            ? -1
+            : nextContentItems.findIndex((item) => item.id === targetId);
         const insertIndex =
-          position === 'before' ? adjustedTargetIndex : adjustedTargetIndex + 1;
+          targetIndex === -1
+            ? getSectionContentInsertIndex(nextContentItems, targetSection, null)
+            : targetIndex + (position === 'after' ? 1 : 0);
 
-        nextTextboxes.splice(insertIndex, 0, movedTextbox);
+        nextContentItems.splice(insertIndex, 0, movedContentItem);
 
         return {
           ...section,
-          textboxes: nextTextboxes,
+          contentItems: nextContentItems,
+          images: section.images.map((image) =>
+            image.id === draggedId ? { ...image, section: targetSection } : image
+          ),
+          textboxes: section.textboxes.map((textbox) =>
+            textbox.id === draggedId
+              ? { ...textbox, section: targetSection }
+              : textbox
+          ),
         };
       });
     },
@@ -741,6 +870,14 @@ export default function Home() {
 
       updateSection(selectedSection.id, (section) => ({
         ...section,
+        contentItems: section.contentItems.map((item) => ({
+          ...item,
+          section: Math.min(item.section, nextSectionCount - 1),
+        })),
+        images: section.images.map((image) => ({
+          ...image,
+          section: Math.min(image.section, nextSectionCount - 1),
+        })),
         layout: nextLayout,
         selectedSection: Math.min(section.selectedSection, nextSectionCount - 1),
         textboxes: section.textboxes.map((textbox) => ({
@@ -799,9 +936,20 @@ export default function Home() {
     setNotification(OVERFLOW_MESSAGE);
   }, []);
 
+  const handlePanelMessage = useCallback((message: string) => {
+    setNotification(message);
+  }, []);
+
   const handleRegisterTextToolbarActionHandler = useCallback(
     (handler: ((action: TextToolbarAction) => void) | null) => {
       textToolbarActionHandlerRef.current = handler;
+    },
+    []
+  );
+
+  const handleRegisterImageInsertHandler = useCallback(
+    (handler: ((request: ImageInsertRequest) => Promise<boolean>) | null) => {
+      imageInsertHandlerRef.current = handler;
     },
     []
   );
@@ -839,6 +987,7 @@ export default function Home() {
     <div className="flex h-screen flex-col overflow-hidden">
       <Navbar
         onAddObject={handleAddObject}
+        onAddImage={handleAddImage}
         onAddSection={handleAddSection}
         onAddSubobject={handleAddSubobject}
         onAddTextbox={handleAddTextbox}
@@ -864,7 +1013,9 @@ export default function Home() {
               key={selectedSection.id}
               panelHeight={PANEL_HEIGHT}
               minTextboxHeight={MIN_TEXTBOX_HEIGHT}
+              contentItems={selectedSection.contentItems}
               layout={selectedSection.layout}
+              images={selectedSection.images}
               selectedSection={selectedSection.selectedSection}
               subtitle={selectedSection.subtitle}
               textboxes={selectedSection.textboxes}
@@ -873,13 +1024,17 @@ export default function Home() {
               onSectionSelect={handlePanelSectionSelect}
               onSubtitleChange={handleSectionSubtitleChange}
               onTextboxChange={handleTextboxChange}
-              onDeleteTextbox={handleDeleteTextbox}
+              onDeleteContentItem={handleDeleteContentItem}
+              onAddImage={handleAddImageItem}
+              onImageChange={handleImageChange}
               onTextboxHeightsChange={handleTextboxHeightsChange}
               onTitleChange={handleSectionTitleChange}
               onAvailableHeightChange={handleAvailableHeightChange}
               onSectionUsageChange={handleSectionUsageChange}
-              onMoveTextbox={handleMoveTextbox}
+              onMoveContentItem={handleMoveContentItem}
               onOverflow={handleOverflow}
+              onImageInsertError={handlePanelMessage}
+              onRegisterImageInsertHandler={handleRegisterImageInsertHandler}
               onRegisterTextToolbarActionHandler={
                 handleRegisterTextToolbarActionHandler
               }

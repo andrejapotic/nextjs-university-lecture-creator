@@ -1,3 +1,5 @@
+import type { TextboxPanelItem } from './panelItemTypes';
+
 type NodeType = 'object' | 'subobject' | 'section';
 
 type LearningSectionListItem = {
@@ -7,11 +9,7 @@ type LearningSectionListItem = {
   parentType: 'object' | 'subobject';
   selectedSection: number;
   subtitle: string;
-  textboxes: {
-    id: number;
-    text: string;
-    section: number;
-  }[];
+  textboxes: TextboxPanelItem[];
   title: string;
   type: 'section';
 };
