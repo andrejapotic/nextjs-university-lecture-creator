@@ -27,6 +27,7 @@ import type { TextToolbarAction, TextToolbarState } from './textEditorTypes';
 type NavbarProps = {
   onAddObject: () => void;
   onAddImage: (file: File) => void;
+  onAddLatex: () => void;
   onAddSection: () => void;
   onAddSubobject: () => void;
   onAddTextbox: () => void;
@@ -37,6 +38,7 @@ type NavbarProps = {
 export default function Navbar({
   onAddObject,
   onAddImage,
+  onAddLatex,
   onAddSection,
   onAddSubobject,
   onAddTextbox,
@@ -69,7 +71,7 @@ export default function Navbar({
           <div className="flex items-center gap-2 overflow-visible rounded-2xl border border-slate-200/80 bg-slate-50/85 px-2 py-2 shadow-[0_12px_28px_-24px_rgba(15,23,42,0.45)]">
             <Textbox onAdd={onAddTextbox} />
             <ImageTool onAdd={onAddImage} />
-            <Latex />
+            <Latex onAdd={onAddLatex} />
             <CodeSnippet />
           </div>
           <div

@@ -1,5 +1,16 @@
 import ToolbarAction, { LatexIcon } from './ToolbarAction';
 
-export default function Latex() {
-  return <ToolbarAction label="Insert LaTeX" icon={<LatexIcon />} disabled />;
+type LatexProps = {
+  onAdd: () => void;
+};
+
+export default function Latex({ onAdd }: LatexProps) {
+  return (
+    <ToolbarAction
+      label="Insert LaTeX"
+      tooltip="Insert LaTeX"
+      icon={<LatexIcon />}
+      onClick={onAdd}
+    />
+  );
 }

@@ -6,10 +6,12 @@ import Sidebar from '../components/Sidebar';
 import Panel from '../components/Panel';
 import LearningMetadataEditor from '../components/LearningMetadataEditor';
 import {
+  createLatexPanelItem,
   createPanelContentItem,
   createTextboxPanelItem,
   type ImageInsertRequest,
   type ImagePanelItem,
+  type LatexPanelItem,
   type PanelContentItem,
   type TextboxPanelItem,
 } from '../components/panelItemTypes';
@@ -26,6 +28,7 @@ type LearningSectionItem = {
   contentItems: PanelContentItem[];
   images: ImagePanelItem[];
   id: number;
+  latexItems: LatexPanelItem[];
   layout: LayoutOption;
   parentId: number;
   parentType: 'object' | 'subobject';
@@ -83,6 +86,7 @@ type SelectionContext =
 
 const PANEL_HEIGHT = 768;
 const PANEL_HEADER_HEIGHT = 144;
+const MIN_LATEX_BLOCK_HEIGHT = 96;
 const MIN_TEXTBOX_HEIGHT = 50;
 const INITIAL_AVAILABLE_PANEL_HEIGHT = PANEL_HEIGHT - PANEL_HEADER_HEIGHT;
 const OVERFLOW_MESSAGE = "It's not possible to add more content to the current section.";
@@ -131,6 +135,7 @@ const createLearningSection = (
   contentItems: [],
   images: [],
   id,
+  latexItems: [],
   layout: 'blank',
   parentId,
   parentType,
@@ -274,6 +279,9 @@ export default function Home() {
   const [objects, setObjects] = useState<LearningObjectItem[]>(INITIAL_OBJECTS);
   const [selectedNode, setSelectedNode] = useState<EditorSelection>(INITIAL_SELECTION);
   const [notification, setNotification] = useState<string | null>(null);
+  const [pendingLatexSelectionId, setPendingLatexSelectionId] = useState<number | null>(
+    null
+  );
   const [textToolbarState, setTextToolbarState] = useState<TextToolbarState>(
     INITIAL_TEXT_TOOLBAR_STATE
   );
@@ -289,6 +297,9 @@ export default function Home() {
   const nextSubobjectNumberRef = useRef(1);
   const nextSectionNumberRef = useRef(2);
   const availablePanelHeightRef = useRef(INITIAL_AVAILABLE_PANEL_HEIGHT);
+  const panelLatexHeightsRef = useRef<Record<number, Record<number, number>>>({
+    2: {},
+  });
   const panelTextboxHeightsRef = useRef<Record<number, Record<number, number>>>({
     2: {},
   });
@@ -515,6 +526,10 @@ export default function Home() {
       ...panelTextboxHeightsRef.current,
       [nextSectionId]: {},
     };
+    panelLatexHeightsRef.current = {
+      ...panelLatexHeightsRef.current,
+      [nextSectionId]: {},
+    };
 
     updateObjects((currentObjects) =>
       currentObjects.map((object) => {
@@ -619,6 +634,48 @@ export default function Home() {
     });
   }, [getNextId, selectedSection, updateSection]);
 
+  const handleAddLatex = useCallback(() => {
+    if (!selectedSection) {
+      setNotification('Select a Learning Section before adding a LaTeX block.');
+      return;
+    }
+
+    const usedHeight =
+      sectionUsageHeightsRef.current[selectedSection.selectedSection] ?? 0;
+
+    if (usedHeight + MIN_LATEX_BLOCK_HEIGHT > availablePanelHeightRef.current) {
+      setNotification(OVERFLOW_MESSAGE);
+      return;
+    }
+
+    const nextLatexId = getNextId();
+
+    updateSection(selectedSection.id, (section) => {
+      const nextLatex = createLatexPanelItem(
+        nextLatexId,
+        section.selectedSection
+      );
+      const nextContentItems = [...section.contentItems];
+
+      nextContentItems.splice(
+        getSectionContentInsertIndex(
+          section.contentItems,
+          section.selectedSection,
+          null
+        ),
+        0,
+        createPanelContentItem(nextLatexId, 'latex', section.selectedSection)
+      );
+
+      return {
+        ...section,
+        contentItems: nextContentItems,
+        latexItems: [...section.latexItems, nextLatex],
+      };
+    });
+    setPendingLatexSelectionId(nextLatexId);
+  }, [getNextId, selectedSection, updateSection]);
+
   const handleAddImage = useCallback(
     async (file: File) => {
       if (!selectedSection) {
@@ -651,6 +708,22 @@ export default function Home() {
         ...section,
         textboxes: section.textboxes.map((textbox) =>
           textbox.id === id ? { ...textbox, text } : textbox
+        ),
+      }));
+    },
+    [selectedSection, updateSection]
+  );
+
+  const handleLatexChange = useCallback(
+    (id: number, source: string) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      updateSection(selectedSection.id, (section) => ({
+        ...section,
+        latexItems: section.latexItems.map((latexItem) =>
+          latexItem.id === id ? { ...latexItem, source } : latexItem
         ),
       }));
     },
@@ -752,6 +825,10 @@ export default function Home() {
           itemToDelete.type === 'image'
             ? section.images.filter((image) => image.id !== id)
             : section.images,
+        latexItems:
+          itemToDelete.type === 'latex'
+            ? section.latexItems.filter((latexItem) => latexItem.id !== id)
+            : section.latexItems,
         textboxes:
           itemToDelete.type === 'textbox'
             ? section.textboxes.filter((textbox) => textbox.id !== id)
@@ -767,6 +844,19 @@ export default function Home() {
 
         panelTextboxHeightsRef.current = {
           ...panelTextboxHeightsRef.current,
+          [selectedSection.id]: nextPanelHeights,
+        };
+      }
+
+      if (itemToDelete.type === 'latex') {
+        const currentPanelHeights =
+          panelLatexHeightsRef.current[selectedSection.id] ?? {};
+        const nextPanelHeights = { ...currentPanelHeights };
+
+        delete nextPanelHeights[id];
+
+        panelLatexHeightsRef.current = {
+          ...panelLatexHeightsRef.current,
           [selectedSection.id]: nextPanelHeights,
         };
       }
@@ -816,6 +906,25 @@ export default function Home() {
         }
       }
 
+      if (draggedContentItem.type === 'latex') {
+        const currentHeights =
+          panelLatexHeightsRef.current[selectedSection.id] ?? {};
+        const draggedHeight = currentHeights[draggedId] ?? MIN_LATEX_BLOCK_HEIGHT;
+        const targetHeight = sectionUsageHeightsRef.current[targetSection] ?? 0;
+        const sourceSection = selectedSection.latexItems.find(
+          (latexItem) => latexItem.id === draggedId
+        )?.section;
+
+        if (
+          sourceSection !== undefined &&
+          sourceSection !== targetSection &&
+          targetHeight + draggedHeight > availablePanelHeightRef.current
+        ) {
+          setNotification(OVERFLOW_MESSAGE);
+          return;
+        }
+      }
+
       updateSection(selectedSection.id, (section) => {
         const draggedIndex = section.contentItems.findIndex(
           (item) => item.id === draggedId
@@ -849,6 +958,11 @@ export default function Home() {
           images: section.images.map((image) =>
             image.id === draggedId ? { ...image, section: targetSection } : image
           ),
+          latexItems: section.latexItems.map((latexItem) =>
+            latexItem.id === draggedId
+              ? { ...latexItem, section: targetSection }
+              : latexItem
+          ),
           textboxes: section.textboxes.map((textbox) =>
             textbox.id === draggedId
               ? { ...textbox, section: targetSection }
@@ -878,6 +992,10 @@ export default function Home() {
           ...image,
           section: Math.min(image.section, nextSectionCount - 1),
         })),
+        latexItems: section.latexItems.map((latexItem) => ({
+          ...latexItem,
+          section: Math.min(latexItem.section, nextSectionCount - 1),
+        })),
         layout: nextLayout,
         selectedSection: Math.min(section.selectedSection, nextSectionCount - 1),
         textboxes: section.textboxes.map((textbox) => ({
@@ -892,6 +1010,10 @@ export default function Home() {
   const handlePanelSectionSelect = useCallback(
     (sectionIndex: number) => {
       if (!selectedSection) {
+        return;
+      }
+
+      if (selectedSection.selectedSection === sectionIndex) {
         return;
       }
 
@@ -918,6 +1040,27 @@ export default function Home() {
 
       panelTextboxHeightsRef.current = {
         ...panelTextboxHeightsRef.current,
+        [selectedSection.id]: heights,
+      };
+    },
+    [selectedSection]
+  );
+
+  const handleLatexHeightsChange = useCallback(
+    (heights: Record<number, number>) => {
+      if (!selectedSection) {
+        return;
+      }
+
+      const currentPanelHeights =
+        panelLatexHeightsRef.current[selectedSection.id] ?? {};
+
+      if (areHeightsEqual(currentPanelHeights, heights)) {
+        return;
+      }
+
+      panelLatexHeightsRef.current = {
+        ...panelLatexHeightsRef.current,
         [selectedSection.id]: heights,
       };
     },
@@ -954,6 +1097,10 @@ export default function Home() {
     []
   );
 
+  const handleLatexSelectionHandled = useCallback(() => {
+    setPendingLatexSelectionId(null);
+  }, []);
+
   const handleTextToolbarAction = useCallback((action: TextToolbarAction) => {
     textToolbarActionHandlerRef.current?.(action);
   }, []);
@@ -988,6 +1135,7 @@ export default function Home() {
       <Navbar
         onAddObject={handleAddObject}
         onAddImage={handleAddImage}
+        onAddLatex={handleAddLatex}
         onAddSection={handleAddSection}
         onAddSubobject={handleAddSubobject}
         onAddTextbox={handleAddTextbox}
@@ -1016,6 +1164,8 @@ export default function Home() {
               contentItems={selectedSection.contentItems}
               layout={selectedSection.layout}
               images={selectedSection.images}
+              latexItems={selectedSection.latexItems}
+              pendingSelectedLatexId={pendingLatexSelectionId}
               selectedSection={selectedSection.selectedSection}
               subtitle={selectedSection.subtitle}
               textboxes={selectedSection.textboxes}
@@ -1023,6 +1173,9 @@ export default function Home() {
               onLayoutChange={handleLayoutChange}
               onSectionSelect={handlePanelSectionSelect}
               onSubtitleChange={handleSectionSubtitleChange}
+              onLatexChange={handleLatexChange}
+              onLatexHeightsChange={handleLatexHeightsChange}
+              onLatexSelectionHandled={handleLatexSelectionHandled}
               onTextboxChange={handleTextboxChange}
               onDeleteContentItem={handleDeleteContentItem}
               onAddImage={handleAddImageItem}

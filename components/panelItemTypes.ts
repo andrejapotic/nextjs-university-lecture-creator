@@ -38,11 +38,12 @@ export type ImageInsertRequest = {
 export type PanelContentItem = {
   id: number;
   section: number;
-  type: 'image' | 'textbox';
+  type: 'image' | 'latex' | 'textbox';
 };
 
 export type LatexPanelItem = PanelItemBase<'latex'> & {
-  expression: string;
+  section: number;
+  source: string;
 };
 
 export type CodeSnippetPanelItem = PanelItemBase<'codeSnippet'> & {
@@ -129,6 +130,18 @@ export const createPanelContentItem = (
   id,
   section,
   type,
+});
+
+export const createLatexPanelItem = (
+  id: number,
+  section: number,
+  source = ''
+): LatexPanelItem => ({
+  ...PANEL_ITEM_FRAME_DEFAULTS,
+  id,
+  section,
+  source,
+  type: 'latex',
 });
 
 export const createPanelItemShellState = (

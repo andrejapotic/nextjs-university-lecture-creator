@@ -1,5 +1,6 @@
 'use client';
 
+import TeX from '@matejmazur/react-katex';
 import {
   useCallback,
   useEffect,
@@ -9,6 +10,7 @@ import {
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import LatexMathEditor, { type LatexMathEditorHandle } from './LatexMathEditor';
 import PanelItemShell from './PanelItemShell';
 import Section from './Section';
 import {
@@ -16,6 +18,7 @@ import {
   createPanelItemShellState,
   type ImageInsertRequest,
   type ImagePanelItem,
+  type LatexPanelItem,
   type PanelContentItem,
   type PanelItem,
   type TextboxPanelItem,
@@ -31,8 +34,16 @@ type LayoutOption = 'blank' | 'split' | 'thirds';
 
 type ImageItem = ImagePanelItem;
 type ContentItem = PanelContentItem;
+type LatexItem = LatexPanelItem;
 type TextboxItem = TextboxPanelItem;
-type ContentPanelItem = ImageItem | TextboxItem;
+type ContentPanelItem = ImageItem | LatexItem | TextboxItem;
+type LatexToolbarAction = {
+  insertLatex?: string;
+  label: string;
+  selectionMode?: 'after' | 'before' | 'item' | 'placeholder';
+  tooltip: string;
+  type: 'insert' | 'clear';
+};
 type ImageInteraction =
   | {
       availableHeight: number;
@@ -64,9 +75,11 @@ type ImageInteraction =
 type PanelProps = {
   contentItems: ContentItem[];
   images: ImageItem[];
+  latexItems: LatexItem[];
   panelHeight: number;
   minTextboxHeight: number;
   layout: LayoutOption;
+  pendingSelectedLatexId: number | null;
   selectedSection: number;
   subtitle: string;
   textboxes: TextboxItem[];
@@ -83,6 +96,9 @@ type PanelProps = {
   onRegisterImageInsertHandler: (
     handler: ((request: ImageInsertRequest) => Promise<boolean>) | null
   ) => void;
+  onLatexChange: (id: number, source: string) => void;
+  onLatexHeightsChange: (heights: Record<number, number>) => void;
+  onLatexSelectionHandled: () => void;
   onTextboxChange: (id: number, text: string) => void;
   onDeleteContentItem: (id: number) => void;
   onTextboxHeightsChange: (heights: Record<number, number>) => void;
@@ -128,6 +144,115 @@ const DEFAULT_IMAGE_OFFSET_STEP = 18;
 const MAX_IMAGE_INSERT_OFFSET = 72;
 const MIN_IMAGE_WIDTH = 120;
 const MIN_IMAGE_HEIGHT = 72;
+const MIN_LATEX_PLACEHOLDER_HEIGHT = 64;
+const LATEX_PLACEHOLDER = String.raw`\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}`;
+const LATEX_EDITOR_MIN_WIDTH = 380;
+const LATEX_EDITOR_MAX_WIDTH = 560;
+const LATEX_EDITOR_OFFSET = 12;
+
+const LATEX_TOOLBAR_ACTIONS: LatexToolbarAction[] = [
+  {
+    insertLatex: String.raw`\frac{#?}{#?}`,
+    label: 'a/b',
+    tooltip: 'Insert fraction',
+    type: 'insert',
+  },
+  {
+    insertLatex: '^{#?}',
+    label: 'x^n',
+    tooltip: 'Insert superscript',
+    type: 'insert',
+  },
+  {
+    insertLatex: '_{#?}',
+    label: 'x_n',
+    tooltip: 'Insert subscript',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\sqrt{#?}`,
+    label: 'sqrt',
+    tooltip: 'Insert square root',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\sqrt[#?]{#?}`,
+    label: 'n-root',
+    tooltip: 'Insert nth root',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\left(#?\right)`,
+    label: '( )',
+    tooltip: 'Insert parentheses',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\left[#?\right]`,
+    label: '[ ]',
+    tooltip: 'Insert brackets',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\sum_{#?}^{#?}`,
+    label: 'sum',
+    tooltip: 'Insert summation',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\int_{#?}^{#?}`,
+    label: 'int',
+    tooltip: 'Insert integral',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\pi`,
+    label: 'pi',
+    selectionMode: 'after',
+    tooltip: 'Insert pi',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\theta`,
+    label: 'theta',
+    selectionMode: 'after',
+    tooltip: 'Insert theta',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\alpha`,
+    label: 'alpha',
+    selectionMode: 'after',
+    tooltip: 'Insert alpha',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\beta`,
+    label: 'beta',
+    selectionMode: 'after',
+    tooltip: 'Insert beta',
+    type: 'insert',
+  },
+  {
+    insertLatex: '=',
+    label: '=',
+    selectionMode: 'after',
+    tooltip: 'Insert equals',
+    type: 'insert',
+  },
+  {
+    insertLatex: String.raw`\ne`,
+    label: '!=',
+    selectionMode: 'after',
+    tooltip: 'Insert not equals',
+    type: 'insert',
+  },
+  {
+    label: 'Clear',
+    tooltip: 'Clear formula',
+    type: 'clear',
+  },
+];
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
@@ -488,9 +613,11 @@ const applyFragmentToCurrentSelection = (
 export default function Panel({
   contentItems,
   images,
+  latexItems,
   panelHeight,
   minTextboxHeight,
   layout,
+  pendingSelectedLatexId,
   selectedSection,
   subtitle,
   textboxes,
@@ -502,6 +629,9 @@ export default function Panel({
   onImageChange,
   onImageInsertError,
   onRegisterImageInsertHandler,
+  onLatexChange,
+  onLatexHeightsChange,
+  onLatexSelectionHandled,
   onTextboxChange,
   onDeleteContentItem,
   onTextboxHeightsChange,
@@ -513,6 +643,7 @@ export default function Panel({
   onRegisterTextToolbarActionHandler,
   onTextToolbarStateChange,
 }: PanelProps) {
+  const latexEditorRef = useRef<LatexMathEditorHandle | null>(null);
   const textboxRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const wrapperRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -522,6 +653,7 @@ export default function Panel({
   const savedSelectionRef = useRef<Range | null>(null);
   const textToolbarStateRef = useRef<TextToolbarState>(INITIAL_TEXT_TOOLBAR_STATE);
   const [selectedImageId, setSelectedImageId] = useState<number | null>(null);
+  const [selectedLatexId, setSelectedLatexId] = useState<number | null>(null);
   const [imageInteraction, setImageInteraction] = useState<ImageInteraction | null>(
     null
   );
@@ -547,6 +679,12 @@ export default function Panel({
   const [menuPosition, setMenuPosition] = useState<{ top: number; right: number } | null>(
     null
   );
+  const [latexEditorPosition, setLatexEditorPosition] = useState<{
+    left: number;
+    placement: 'above' | 'below';
+    top: number;
+    width: number;
+  } | null>(null);
 
   const sectionCount = useMemo(() => getSectionCount(layout), [layout]);
   const panelItemLookup = useMemo(() => {
@@ -556,12 +694,16 @@ export default function Panel({
       nextLookup.set(textbox.id, textbox);
     });
 
+    latexItems.forEach((latexItem) => {
+      nextLookup.set(latexItem.id, latexItem);
+    });
+
     images.forEach((image) => {
       nextLookup.set(image.id, image);
     });
 
     return nextLookup;
-  }, [images, textboxes]);
+  }, [images, latexItems, textboxes]);
   const sectionContentItems = useMemo(
     () =>
       Array.from({ length: sectionCount }, (_, sectionIndex) =>
@@ -582,8 +724,16 @@ export default function Panel({
     () =>
       contentItems.find((item) => item.id === hoveredContentItemId) ??
       contentItems.find((item) => item.id === selectedImageId) ??
+      contentItems.find((item) => item.id === selectedLatexId) ??
       null,
-    [contentItems, hoveredContentItemId, selectedImageId]
+    [contentItems, hoveredContentItemId, selectedImageId, selectedLatexId]
+  );
+  const selectedLatexItem = useMemo(
+    () =>
+      selectedLatexId === null
+        ? null
+        : latexItems.find((item) => item.id === selectedLatexId) ?? null,
+    [latexItems, selectedLatexId]
   );
 
   const setTextToolbarState = useCallback(
@@ -613,13 +763,21 @@ export default function Panel({
         return editor?.offsetHeight ?? minTextboxHeight;
       }
 
-      const image = panelItemLookup.get(item.id);
+      const panelItem = panelItemLookup.get(item.id);
 
-      if (!image || image.type !== 'image') {
+      if (!panelItem) {
         return 0;
       }
 
-      return getImageWrapperHeight(image);
+      if (panelItem.type === 'image') {
+        return getImageWrapperHeight(panelItem);
+      }
+
+      if (panelItem.type === 'latex') {
+        return MIN_LATEX_PLACEHOLDER_HEIGHT;
+      }
+
+      return 0;
     },
     [minTextboxHeight, panelItemLookup]
   );
@@ -687,6 +845,17 @@ export default function Panel({
         return accumulator;
       }, {}),
     [measureTextboxHeight, minTextboxHeight, textboxes]
+  );
+
+  const measureLatexHeights = useCallback(
+    () =>
+      latexItems.reduce<Record<number, number>>((accumulator, latexItem) => {
+        const wrapper = wrapperRefs.current[latexItem.id];
+
+        accumulator[latexItem.id] = wrapper?.offsetHeight ?? MIN_LATEX_PLACEHOLDER_HEIGHT;
+        return accumulator;
+      }, {}),
+    [latexItems]
   );
 
   const measureSectionUsage = useCallback(() => {
@@ -1104,6 +1273,7 @@ export default function Panel({
     });
 
     const nextHeights = measureHeights();
+    const nextLatexHeights = measureLatexHeights();
 
     lastValidTextboxValuesRef.current = textboxes.reduce<Record<number, string>>(
       (accumulator, textbox) => {
@@ -1113,13 +1283,18 @@ export default function Panel({
       {}
     );
     onTextboxHeightsChange(nextHeights);
+    onLatexHeightsChange(nextLatexHeights);
     onSectionUsageChange(measureSectionUsage());
   }, [
+    latexItems,
     layout,
     measureHeights,
+    measureLatexHeights,
     measureSectionUsage,
+    onLatexHeightsChange,
     onSectionUsageChange,
     onTextboxHeightsChange,
+    selectedLatexId,
     textboxes,
   ]);
 
@@ -1249,6 +1424,47 @@ export default function Panel({
     });
   }, []);
 
+  const updateLatexEditorPosition = useCallback((id: number) => {
+    const wrapper = wrapperRefs.current[id];
+
+    if (!wrapper) {
+      setLatexEditorPosition(null);
+      return;
+    }
+
+    const rect = wrapper.getBoundingClientRect();
+    const maxWidth = Math.max(window.innerWidth - 32, 0);
+    const width = Math.min(
+      LATEX_EDITOR_MAX_WIDTH,
+      Math.max(Math.min(rect.width, maxWidth), Math.min(LATEX_EDITOR_MIN_WIDTH, maxWidth))
+    );
+    const placement = 'below';
+    const left = Math.min(
+      Math.max(16, rect.left),
+      Math.max(16, window.innerWidth - width - 16)
+    );
+    const top = rect.bottom + LATEX_EDITOR_OFFSET;
+
+    setLatexEditorPosition((current) => {
+      if (
+        current &&
+        current.left === left &&
+        current.placement === placement &&
+        current.top === top &&
+        current.width === width
+      ) {
+        return current;
+      }
+
+      return {
+        left,
+        placement,
+        top,
+        width,
+      };
+    });
+  }, []);
+
   useEffect(() => {
     if (activeActionContentItem === null) {
       return undefined;
@@ -1265,16 +1481,30 @@ export default function Panel({
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('scroll', handleViewportChange, true);
     };
-  }, [activeActionContentItem, contentItems, images, textboxes, updateMenuPosition]);
+  }, [
+    activeActionContentItem,
+    contentItems,
+    images,
+    latexItems,
+    textboxes,
+    updateMenuPosition,
+  ]);
 
   const handleDragStart = (id: number) => {
     setDraggedContentItemId(id);
     setDropTarget(null);
 
-    if (panelItemLookup.get(id)?.type === 'image') {
+    const panelItem = panelItemLookup.get(id);
+
+    if (panelItem?.type === 'image') {
       setSelectedImageId(id);
+      setSelectedLatexId(null);
+    } else if (panelItem?.type === 'latex') {
+      setSelectedImageId(null);
+      setSelectedLatexId(id);
     } else {
       setSelectedImageId(null);
+      setSelectedLatexId(null);
     }
   };
 
@@ -1394,6 +1624,25 @@ export default function Panel({
     clearTextToolbarState();
   }, [clearTextToolbarState]);
 
+  const selectLatexItem = useCallback(
+    (latexItem: LatexItem) => {
+      if (closeMenuTimeoutRef.current !== null) {
+        window.clearTimeout(closeMenuTimeoutRef.current);
+        closeMenuTimeoutRef.current = null;
+      }
+
+      clearTextToolbarState();
+      if (selectedSection !== latexItem.section) {
+        onSectionSelect(latexItem.section);
+      }
+      setSelectedImageId(null);
+      setSelectedLatexId(latexItem.id);
+      setHoveredContentItemId(latexItem.id);
+      updateMenuPosition(latexItem.id);
+    },
+    [clearTextToolbarState, onSectionSelect, selectedSection, updateMenuPosition]
+  );
+
   const startImageInteraction = useCallback(
     (
       event: React.MouseEvent<HTMLButtonElement | HTMLDivElement>,
@@ -1419,6 +1668,7 @@ export default function Panel({
       dismissTextboxUi();
       onSectionSelect(image.section);
       setSelectedImageId(image.id);
+      setSelectedLatexId(null);
       setImageInteraction({
         availableHeight: getAvailableHeightForContentSlot(
           image.section,
@@ -1449,8 +1699,39 @@ export default function Panel({
     [startImageInteraction, updateMenuPosition]
   );
 
+  const handleLatexMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>, latexItem: LatexItem) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      selectLatexItem(latexItem);
+    },
+    [selectLatexItem]
+  );
+
+  const handleLatexToolbarAction = useCallback((action: LatexToolbarAction) => {
+    if (!latexEditorRef.current) {
+      return;
+    }
+
+    if (action.type === 'clear') {
+      latexEditorRef.current.clear();
+      return;
+    }
+
+    if (!action.insertLatex) {
+      return;
+    }
+
+    latexEditorRef.current.insert(action.insertLatex, {
+      selectionMode: action.selectionMode ?? 'placeholder',
+    });
+  }, []);
+
   const handleTextboxFocus = (textboxId: number) => {
     setSelectedImageId(null);
+    setSelectedLatexId(null);
     activeTextboxIdRef.current = textboxId;
     updateTextToolbarStateFromSelection(textboxId);
   };
@@ -1529,6 +1810,8 @@ export default function Panel({
         const itemsInSection = sectionContentItems[selectedSection] ?? [];
         const anchorId = itemsInSection.some((item) => item.id === selectedImageId)
           ? selectedImageId
+          : itemsInSection.some((item) => item.id === selectedLatexId)
+            ? selectedLatexId
           : itemsInSection.some((item) => item.id === activeTextboxIdRef.current)
             ? activeTextboxIdRef.current
             : null;
@@ -1579,6 +1862,7 @@ export default function Panel({
         dismissTextboxUi();
         onSectionSelect(selectedSection);
         setSelectedImageId(id);
+        setSelectedLatexId(null);
         return true;
       } catch {
         onImageInsertError('The selected image could not be loaded.');
@@ -1593,6 +1877,7 @@ export default function Panel({
       onSectionSelect,
       sectionContentItems,
       selectedImageId,
+      selectedLatexId,
       selectedSection,
     ]
   );
@@ -1606,10 +1891,68 @@ export default function Panel({
   }, [handleInsertImageRequest, onRegisterImageInsertHandler]);
 
   useEffect(() => {
+    if (pendingSelectedLatexId === null) {
+      return undefined;
+    }
+
+    const latexItem = latexItems.find((item) => item.id === pendingSelectedLatexId);
+
+    if (!latexItem) {
+      onLatexSelectionHandled();
+      return undefined;
+    }
+
+    selectLatexItem(latexItem);
+    onLatexSelectionHandled();
+
+    const frameId = window.requestAnimationFrame(() => {
+      latexEditorRef.current?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [
+    latexItems,
+    onLatexSelectionHandled,
+    pendingSelectedLatexId,
+    selectLatexItem,
+  ]);
+
+  useLayoutEffect(() => {
+    if (selectedLatexItem === null) {
+      setLatexEditorPosition(null);
+      return undefined;
+    }
+
+    updateLatexEditorPosition(selectedLatexItem.id);
+
+    const handleViewportChange = () => updateLatexEditorPosition(selectedLatexItem.id);
+
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [contentItems, layout, selectedLatexItem, updateLatexEditorPosition]);
+
+  useEffect(() => {
     if (selectedImageId !== null && !images.some((image) => image.id === selectedImageId)) {
       setSelectedImageId(null);
     }
   }, [images, selectedImageId]);
+
+  useEffect(() => {
+    if (
+      selectedLatexId !== null &&
+      !latexItems.some((latexItem) => latexItem.id === selectedLatexId)
+    ) {
+      setSelectedLatexId(null);
+      setLatexEditorPosition(null);
+    }
+  }, [latexItems, selectedLatexId]);
 
   useEffect(() => {
     if (!imageInteraction) {
@@ -1722,6 +2065,58 @@ export default function Panel({
       );
     }
 
+    if (item.type === 'latex') {
+      const isSelected = selectedLatexId === item.id;
+      const dropIndicator =
+        dropTarget?.type === 'item' && dropTarget.id === item.id
+          ? dropTarget.position
+          : null;
+      const hasSource = item.source.trim().length > 0;
+
+      return (
+        <PanelItemShell
+          key={item.id}
+          item={createPanelItemShellState(item, isSelected)}
+          itemRef={(element) => {
+            wrapperRefs.current[item.id] = element;
+          }}
+          dropIndicator={dropIndicator}
+          onDragOver={(event) => handleDragOver(event, item)}
+          onDrop={(event) => handleDrop(event, item)}
+          onMouseDown={(event) => handleLatexMouseDown(event, item)}
+          onMouseEnter={() => handleContentItemMouseEnter(item.id)}
+          onMouseLeave={scheduleMenuClose}
+        >
+          <div
+            className={`border bg-white/95 px-4 py-4 transition-[border-color,box-shadow,transform] duration-200 ease-out ${
+              isSelected
+                ? 'border-sky-300 shadow-[0_24px_50px_-30px_rgba(14,165,233,0.42)] ring-2 ring-sky-200/70'
+                : 'border-slate-200/80 shadow-[0_18px_40px_-32px_rgba(15,23,42,0.28)] hover:border-slate-300'
+            }`}
+          >
+            <div className="latex-preview min-h-16 overflow-x-auto px-1 py-1">
+              {hasSource ? (
+                <TeX
+                  block
+                  math={item.source}
+                  className="text-slate-900"
+                  renderError={(error) => (
+                    <div className="border border-red-200/80 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {error.message}
+                    </div>
+                  )}
+                />
+              ) : (
+                <div className="flex min-h-10 items-center text-sm text-slate-400">
+                  {isSelected ? 'Build a formula from the math toolbar.' : 'Empty LaTeX block'}
+                </div>
+              )}
+            </div>
+          </div>
+        </PanelItemShell>
+      );
+    }
+
     if (item.type === 'image') {
       const isSelected = selectedImageId === item.id;
       const wrapperHeight = getImageWrapperHeight(item);
@@ -1799,7 +2194,10 @@ export default function Panel({
                 <input
                   type="text"
                   value={title}
-                  onFocus={() => setSelectedImageId(null)}
+                  onFocus={() => {
+                    setSelectedImageId(null);
+                    setSelectedLatexId(null);
+                  }}
                   onChange={(event) => onTitleChange(event.target.value)}
                   placeholder="Section title"
                   className="h-12 w-full border-none bg-transparent text-3xl font-semibold text-slate-900 outline-none placeholder:text-slate-400"
@@ -1807,7 +2205,10 @@ export default function Panel({
                 <input
                   type="text"
                   value={subtitle}
-                  onFocus={() => setSelectedImageId(null)}
+                  onFocus={() => {
+                    setSelectedImageId(null);
+                    setSelectedLatexId(null);
+                  }}
                   onChange={(event) => onSubtitleChange(event.target.value)}
                   placeholder="Section subtitle"
                   className="h-8 w-full border-none bg-transparent text-lg text-slate-500 outline-none placeholder:text-slate-400"
@@ -1826,6 +2227,7 @@ export default function Panel({
 
                     if (event.target === event.currentTarget) {
                       setSelectedImageId(null);
+                      setSelectedLatexId(null);
                     }
                   }}
                   onDragOver={(event) => handleSectionDragOver(event, sectionIndex)}
@@ -1849,6 +2251,63 @@ export default function Panel({
           </div>
         </div>
       </div>
+      {selectedLatexItem !== null && latexEditorPosition !== null
+        ? createPortal(
+            <div
+              className="fixed z-40"
+              style={{
+                left: latexEditorPosition.left,
+                top: latexEditorPosition.top,
+                width: latexEditorPosition.width,
+              }}
+            >
+              <div className="animate-surface-in border border-slate-200/90 bg-white/96 shadow-[0_26px_60px_-34px_rgba(15,23,42,0.42)] backdrop-blur-xl">
+                <div className="border-b border-slate-200/80 px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    Formula editor
+                  </p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Use the toolbar or type directly in the math field.
+                  </p>
+                </div>
+                <div className="px-4 py-4">
+                  <LatexMathEditor
+                    key={selectedLatexItem.id}
+                    ref={latexEditorRef}
+                    ariaLabel="LaTeX formula editor"
+                    autoFocus
+                    placeholder={LATEX_PLACEHOLDER}
+                    value={selectedLatexItem.source}
+                    onChange={(source) => onLatexChange(selectedLatexItem.id, source)}
+                  />
+                </div>
+                <div className="border-t border-slate-200/80 px-4 py-3">
+                  <div className="flex flex-wrap gap-2">
+                    {LATEX_TOOLBAR_ACTIONS.map((action) => (
+                      <button
+                        key={`${action.type}-${action.label}`}
+                        type="button"
+                        title={action.tooltip}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          handleLatexToolbarAction(action);
+                        }}
+                        className={`border px-2.5 py-1.5 text-xs font-medium transition-colors duration-200 ${
+                          action.type === 'clear'
+                            ? 'border-red-200 text-red-600 hover:bg-red-50'
+                            : 'border-slate-200/80 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
       {activeActionContentItem !== null && menuPosition !== null
         ? createPortal(
             <div
@@ -1883,13 +2342,18 @@ export default function Panel({
                     if (activeActionContentItem.type === 'image') {
                       setSelectedImageId(null);
                     }
+                    if (activeActionContentItem.type === 'latex') {
+                      setSelectedLatexId(null);
+                    }
                     setMenuPosition(null);
                   }}
                   className="rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors duration-200 hover:bg-red-50"
                   aria-label={
                     activeActionContentItem.type === 'image'
                       ? 'Delete image'
-                      : 'Delete textbox'
+                      : activeActionContentItem.type === 'latex'
+                        ? 'Delete LaTeX block'
+                        : 'Delete textbox'
                   }
                 >
                   Trash
