@@ -10,6 +10,12 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import Section from './Section';
+import {
+  INITIAL_TEXT_TOOLBAR_STATE,
+  type SemanticTextStyle,
+  type TextToolbarAction,
+  type TextToolbarState,
+} from './textEditorTypes';
 
 type LayoutOption = 'blank' | 'split' | 'thirds';
 
@@ -43,6 +49,10 @@ type PanelProps = {
     position: 'before' | 'after'
   ) => void;
   onOverflow: () => void;
+  onRegisterTextToolbarActionHandler: (
+    handler: ((action: TextToolbarAction) => void) | null
+  ) => void;
+  onTextToolbarStateChange: (state: TextToolbarState) => void;
 };
 
 const getSectionCount = (layout: LayoutOption) => {
@@ -55,6 +65,198 @@ const getSectionCount = (layout: LayoutOption) => {
   }
 
   return 1;
+};
+
+const SEMANTIC_COLORS: Record<
+  SemanticTextStyle,
+  { background?: [number, number, number]; color?: [number, number, number] }
+> = {
+  foreignWord: {
+    color: [249, 115, 22],
+  },
+  highlight: {
+    background: [253, 224, 71],
+  },
+  keyword: {
+    color: [220, 38, 38],
+  },
+  phrase: {
+    color: [139, 92, 246],
+  },
+  reservedWord: {
+    color: [34, 197, 94],
+  },
+  term: {
+    color: [59, 130, 246],
+  },
+};
+
+const normalizePlainText = (text: string) => text.replace(/\r\n?/g, '\n');
+
+const getRgbValues = (value: string) => {
+  const matches = value.match(/\d+(?:\.\d+)?/g);
+
+  if (!matches || matches.length < 3) {
+    return null;
+  }
+
+  return matches.slice(0, 3).map((entry) => Math.round(Number(entry))) as [
+    number,
+    number,
+    number,
+  ];
+};
+
+const isSelectionInsideEditor = (
+  editor: HTMLElement,
+  selection: Selection | null
+) => {
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+
+  return (
+    editor.contains(range.startContainer) && editor.contains(range.endContainer)
+  );
+};
+
+const getSelectionStyleElement = (
+  editor: HTMLElement,
+  selection: Selection
+): HTMLElement | null => {
+  if (selection.rangeCount === 0) {
+    return null;
+  }
+
+  let node: Node | null = selection.getRangeAt(0).startContainer;
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    node = node.parentNode;
+  }
+
+  while (node && node !== editor) {
+    if (node instanceof HTMLElement) {
+      return node;
+    }
+
+    node = node.parentNode;
+  }
+
+  return editor;
+};
+
+const isMatchingColor = (
+  actualValue: string,
+  expectedValue: [number, number, number]
+) => {
+  const parsedValue = getRgbValues(actualValue);
+
+  if (!parsedValue) {
+    return false;
+  }
+
+  return parsedValue.every(
+    (channel, index) => Math.abs(channel - expectedValue[index]) <= 18
+  );
+};
+
+const createFragmentFromPlainText = (text: string) => {
+  const fragment = document.createDocumentFragment();
+  const lines = normalizePlainText(text).split('\n');
+
+  lines.forEach((line, index) => {
+    if (line.length > 0) {
+      fragment.appendChild(document.createTextNode(line));
+    }
+
+    if (index < lines.length - 1) {
+      fragment.appendChild(document.createElement('br'));
+    }
+  });
+
+  return fragment;
+};
+
+const safeExecCommand = (command: string, value?: string) => {
+  try {
+    return document.execCommand(command, false, value);
+  } catch {
+    return false;
+  }
+};
+
+const safeQueryCommandState = (command: string) => {
+  try {
+    return document.queryCommandState(command);
+  } catch {
+    return false;
+  }
+};
+
+const syncEditorEmptyState = (element: HTMLDivElement) => {
+  const normalizedText = (element.textContent ?? '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\u200b/g, '')
+    .trim();
+
+  element.dataset.empty =
+    normalizedText.length === 0 && !element.querySelector('li') ? 'true' : 'false';
+};
+
+const isEditorEmpty = (element: HTMLDivElement) =>
+  element.dataset.empty === 'true';
+
+const applyFragmentToCurrentSelection = (
+  editor: HTMLDivElement,
+  fragment: DocumentFragment,
+  selectionMode: 'collapse-end' | 'select'
+) => {
+  const selection = window.getSelection();
+
+  if (!selection) {
+    return null;
+  }
+
+  if (selection.rangeCount === 0 || !isSelectionInsideEditor(editor, selection)) {
+    const fallbackRange = document.createRange();
+    fallbackRange.selectNodeContents(editor);
+    fallbackRange.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(fallbackRange);
+  }
+
+  if (selection.rangeCount === 0) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const nodes = Array.from(fragment.childNodes);
+  const insertionFragment = document.createDocumentFragment();
+
+  nodes.forEach((node) => insertionFragment.appendChild(node));
+
+  range.deleteContents();
+  range.insertNode(insertionFragment);
+
+  const nextRange = document.createRange();
+
+  if (nodes.length === 0) {
+    nextRange.selectNodeContents(editor);
+    nextRange.collapse(false);
+  } else if (selectionMode === 'select') {
+    nextRange.setStartBefore(nodes[0]);
+    nextRange.setEndAfter(nodes[nodes.length - 1]);
+  } else {
+    nextRange.setStartAfter(nodes[nodes.length - 1]);
+    nextRange.collapse(true);
+  }
+
+  selection.removeAllRanges();
+  selection.addRange(nextRange);
+
+  return nextRange.cloneRange();
 };
 
 export default function Panel({
@@ -76,12 +278,17 @@ export default function Panel({
   onSectionUsageChange,
   onMoveTextbox,
   onOverflow,
+  onRegisterTextToolbarActionHandler,
+  onTextToolbarStateChange,
 }: PanelProps) {
-  const textboxRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
+  const textboxRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const wrapperRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const lastValidTextboxValuesRef = useRef<Record<number, string>>({});
   const closeMenuTimeoutRef = useRef<number | null>(null);
+  const activeTextboxIdRef = useRef<number | null>(null);
+  const savedSelectionRef = useRef<Range | null>(null);
+  const textToolbarStateRef = useRef<TextToolbarState>(INITIAL_TEXT_TOOLBAR_STATE);
   const [draggedTextboxId, setDraggedTextboxId] = useState<number | null>(null);
   const [dropTarget, setDropTarget] = useState<
     | {
@@ -111,8 +318,22 @@ export default function Panel({
     [hoveredTextboxId, textboxes]
   );
 
+  const setTextToolbarState = useCallback(
+    (nextState: TextToolbarState) => {
+      textToolbarStateRef.current = nextState;
+      onTextToolbarStateChange(nextState);
+    },
+    [onTextToolbarStateChange]
+  );
+
+  const clearTextToolbarState = useCallback(() => {
+    activeTextboxIdRef.current = null;
+    savedSelectionRef.current = null;
+    setTextToolbarState(INITIAL_TEXT_TOOLBAR_STATE);
+  }, [setTextToolbarState]);
+
   const measureTextboxHeight = useCallback(
-    (element: HTMLTextAreaElement) => {
+    (element: HTMLDivElement) => {
       element.style.height = '0px';
 
       const computedStyles = window.getComputedStyle(element);
@@ -123,6 +344,7 @@ export default function Panel({
         element.scrollHeight + borderHeight,
         minTextboxHeight
       );
+
       element.style.height = `${nextHeight}px`;
       element.style.overflowY = 'hidden';
 
@@ -190,7 +412,377 @@ export default function Panel({
     [panelHeight]
   );
 
+  const restoreSavedSelection = useCallback((editor: HTMLDivElement) => {
+    editor.focus();
+
+    const selection = window.getSelection();
+
+    if (!selection) {
+      return false;
+    }
+
+    const savedSelection = savedSelectionRef.current;
+
+    if (
+      savedSelection &&
+      editor.contains(savedSelection.startContainer) &&
+      editor.contains(savedSelection.endContainer)
+    ) {
+      selection.removeAllRanges();
+      selection.addRange(savedSelection);
+      return true;
+    }
+
+    const fallbackRange = document.createRange();
+    fallbackRange.selectNodeContents(editor);
+    fallbackRange.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(fallbackRange);
+    savedSelectionRef.current = fallbackRange.cloneRange();
+
+    return true;
+  }, []);
+
+  const getSemanticStyle = useCallback((editor: HTMLDivElement, selection: Selection) => {
+    const styleElement = getSelectionStyleElement(editor, selection);
+
+    if (!styleElement) {
+      return null;
+    }
+
+    const computedStyles = window.getComputedStyle(styleElement);
+    const isItalic =
+      computedStyles.fontStyle === 'italic' || safeQueryCommandState('italic');
+
+    if (
+      SEMANTIC_COLORS.highlight.background &&
+      isMatchingColor(
+        computedStyles.backgroundColor,
+        SEMANTIC_COLORS.highlight.background
+      )
+    ) {
+      return 'highlight';
+    }
+
+    if (
+      SEMANTIC_COLORS.keyword.color &&
+      safeQueryCommandState('underline') &&
+      isMatchingColor(computedStyles.color, SEMANTIC_COLORS.keyword.color)
+    ) {
+      return 'keyword';
+    }
+
+    if (
+      SEMANTIC_COLORS.term.color &&
+      isItalic &&
+      isMatchingColor(computedStyles.color, SEMANTIC_COLORS.term.color)
+    ) {
+      return 'term';
+    }
+
+    if (
+      SEMANTIC_COLORS.phrase.color &&
+      isItalic &&
+      isMatchingColor(computedStyles.color, SEMANTIC_COLORS.phrase.color)
+    ) {
+      return 'phrase';
+    }
+
+    if (
+      SEMANTIC_COLORS.foreignWord.color &&
+      isMatchingColor(computedStyles.color, SEMANTIC_COLORS.foreignWord.color)
+    ) {
+      return 'foreignWord';
+    }
+
+    if (
+      SEMANTIC_COLORS.reservedWord.color &&
+      isMatchingColor(computedStyles.color, SEMANTIC_COLORS.reservedWord.color)
+    ) {
+      return 'reservedWord';
+    }
+
+    return null;
+  }, []);
+
+  const updateTextToolbarStateFromSelection = useCallback(
+    (textboxId: number | null = activeTextboxIdRef.current) => {
+      if (textboxId === null) {
+        clearTextToolbarState();
+        return;
+      }
+
+      const editor = textboxRefs.current[textboxId];
+
+      if (!editor) {
+        clearTextToolbarState();
+        return;
+      }
+
+      const selection = window.getSelection();
+
+      if (!selection || selection.rangeCount === 0) {
+        if (document.activeElement === editor) {
+          setTextToolbarState({
+            ...INITIAL_TEXT_TOOLBAR_STATE,
+            textboxId,
+            visible: true,
+          });
+          return;
+        }
+
+        clearTextToolbarState();
+        return;
+      }
+
+      if (!isSelectionInsideEditor(editor, selection)) {
+        if (document.activeElement === editor) {
+          setTextToolbarState({
+            ...INITIAL_TEXT_TOOLBAR_STATE,
+            textboxId,
+            visible: true,
+          });
+          return;
+        }
+
+        clearTextToolbarState();
+        return;
+      }
+
+      activeTextboxIdRef.current = textboxId;
+      savedSelectionRef.current = selection.getRangeAt(0).cloneRange();
+
+      setTextToolbarState({
+        bold: safeQueryCommandState('bold'),
+        hasSelection:
+          !selection.isCollapsed && selection.toString().trim().length > 0,
+        italic: safeQueryCommandState('italic'),
+        orderedList: safeQueryCommandState('insertOrderedList'),
+        semanticStyle: getSemanticStyle(editor, selection),
+        subscript: safeQueryCommandState('subscript'),
+        superscript: safeQueryCommandState('superscript'),
+        textboxId,
+        underline: safeQueryCommandState('underline'),
+        unorderedList: safeQueryCommandState('insertUnorderedList'),
+        visible: true,
+      });
+    },
+    [clearTextToolbarState, getSemanticStyle, setTextToolbarState]
+  );
+
+  const commitTextboxContent = useCallback(
+    (textbox: TextboxItem) => {
+      const element = textboxRefs.current[textbox.id];
+
+      if (!element) {
+        return false;
+      }
+
+      const previousHeight = element.offsetHeight || minTextboxHeight;
+
+      syncEditorEmptyState(element);
+
+      if (isEditorEmpty(element) && element.innerHTML !== '') {
+        element.innerHTML = '';
+      }
+
+      const nextText = isEditorEmpty(element) ? '' : element.innerHTML;
+
+      measureTextboxHeight(element);
+
+      const nextSectionUsage = measureSectionUsage();
+
+      if (
+        (nextSectionUsage[textbox.section] ?? 0) >
+        getAvailableHeight(textbox.section)
+      ) {
+        const lastValidValue =
+          lastValidTextboxValuesRef.current[textbox.id] ?? textbox.text;
+
+        element.innerHTML = lastValidValue;
+        syncEditorEmptyState(element);
+        measureTextboxHeight(element);
+        element.style.height = `${previousHeight}px`;
+        savedSelectionRef.current = null;
+        onOverflow();
+        updateTextToolbarStateFromSelection(textbox.id);
+        return false;
+      }
+
+      lastValidTextboxValuesRef.current[textbox.id] = nextText;
+
+      if (nextText !== textbox.text) {
+        onTextboxChange(textbox.id, nextText);
+      }
+
+      updateTextToolbarStateFromSelection(textbox.id);
+      return true;
+    },
+    [
+      getAvailableHeight,
+      measureSectionUsage,
+      measureTextboxHeight,
+      minTextboxHeight,
+      onOverflow,
+      onTextboxChange,
+      updateTextToolbarStateFromSelection,
+    ]
+  );
+
+  const clearSelectionFormatting = useCallback(
+    (editor: HTMLDivElement) => {
+      const selection = window.getSelection();
+
+      if (
+        !selection ||
+        selection.rangeCount === 0 ||
+        selection.isCollapsed ||
+        !isSelectionInsideEditor(editor, selection)
+      ) {
+        return false;
+      }
+
+      const plainText = selection.toString();
+      const hadOrderedList = textToolbarStateRef.current.orderedList;
+      const hadUnorderedList = textToolbarStateRef.current.unorderedList;
+      const nextRange = applyFragmentToCurrentSelection(
+        editor,
+        createFragmentFromPlainText(plainText),
+        'select'
+      );
+
+      if (!nextRange) {
+        return false;
+      }
+
+      if (hadOrderedList) {
+        safeExecCommand('insertOrderedList');
+      }
+
+      if (hadUnorderedList) {
+        safeExecCommand('insertUnorderedList');
+      }
+
+      const updatedSelection = window.getSelection();
+      savedSelectionRef.current =
+        updatedSelection && updatedSelection.rangeCount > 0
+          ? updatedSelection.getRangeAt(0).cloneRange()
+          : nextRange;
+
+      return true;
+    },
+    []
+  );
+
+  const applySemanticStyle = useCallback((style: SemanticTextStyle) => {
+    safeExecCommand('styleWithCSS', 'true');
+
+    if ((style === 'term' || style === 'phrase') && !safeQueryCommandState('italic')) {
+      safeExecCommand('italic');
+    }
+
+    if (style === 'keyword' && !safeQueryCommandState('underline')) {
+      safeExecCommand('underline');
+    }
+
+    if (style === 'highlight') {
+      if (!safeExecCommand('hiliteColor', '#fde047')) {
+        safeExecCommand('backColor', '#fde047');
+      }
+    } else {
+      const colorValue =
+        style === 'keyword'
+          ? '#dc2626'
+          : style === 'term'
+            ? '#3b82f6'
+            : style === 'phrase'
+              ? '#8b5cf6'
+              : style === 'foreignWord'
+                ? '#f97316'
+                : '#22c55e';
+
+      safeExecCommand('foreColor', colorValue);
+    }
+
+    safeExecCommand('styleWithCSS', 'false');
+  }, []);
+
+  const handleTextToolbarAction = useCallback(
+    (action: TextToolbarAction) => {
+      const activeTextboxId = activeTextboxIdRef.current;
+
+      if (activeTextboxId === null) {
+        return;
+      }
+
+      const editor = textboxRefs.current[activeTextboxId];
+      const textbox = textboxes.find((entry) => entry.id === activeTextboxId);
+
+      if (!editor || !textbox) {
+        return;
+      }
+
+      restoreSavedSelection(editor);
+
+      if (action === 'clear') {
+        if (!clearSelectionFormatting(editor)) {
+          return;
+        }
+      } else if (
+        action === 'keyword' ||
+        action === 'term' ||
+        action === 'phrase' ||
+        action === 'highlight' ||
+        action === 'foreignWord' ||
+        action === 'reservedWord'
+      ) {
+        applySemanticStyle(action);
+      } else {
+        safeExecCommand('styleWithCSS', 'false');
+
+        if (action === 'bold') {
+          safeExecCommand('bold');
+        } else if (action === 'italic') {
+          safeExecCommand('italic');
+        } else if (action === 'underline') {
+          safeExecCommand('underline');
+        } else if (action === 'superscript') {
+          safeExecCommand('superscript');
+        } else if (action === 'subscript') {
+          safeExecCommand('subscript');
+        } else if (action === 'orderedList') {
+          safeExecCommand('insertOrderedList');
+        } else if (action === 'unorderedList') {
+          safeExecCommand('insertUnorderedList');
+        }
+      }
+
+      commitTextboxContent(textbox);
+    },
+    [
+      applySemanticStyle,
+      clearSelectionFormatting,
+      commitTextboxContent,
+      restoreSavedSelection,
+      textboxes,
+    ]
+  );
+
   useLayoutEffect(() => {
+    textboxes.forEach((textbox) => {
+      const element = textboxRefs.current[textbox.id];
+
+      if (!element) {
+        return;
+      }
+
+      if (element.innerHTML !== textbox.text) {
+        element.innerHTML = textbox.text;
+      }
+
+      syncEditorEmptyState(element);
+    });
+
     const nextHeights = measureHeights();
 
     lastValidTextboxValuesRef.current = textboxes.reduce<Record<number, string>>(
@@ -241,12 +833,48 @@ export default function Panel({
   }, [layout, onAvailableHeightChange, panelHeight]);
 
   useEffect(() => {
+    onRegisterTextToolbarActionHandler(handleTextToolbarAction);
+
+    return () => {
+      onRegisterTextToolbarActionHandler(null);
+    };
+  }, [handleTextToolbarAction, onRegisterTextToolbarActionHandler]);
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      if (activeTextboxIdRef.current === null) {
+        return;
+      }
+
+      updateTextToolbarStateFromSelection(activeTextboxIdRef.current);
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [updateTextToolbarStateFromSelection]);
+
+  useEffect(() => {
+    if (
+      activeTextboxIdRef.current !== null &&
+      !textboxes.some((textbox) => textbox.id === activeTextboxIdRef.current)
+    ) {
+      clearTextToolbarState();
+    }
+  }, [clearTextToolbarState, textboxes]);
+
+  useEffect(() => {
     return () => {
       if (closeMenuTimeoutRef.current !== null) {
         window.clearTimeout(closeMenuTimeoutRef.current);
       }
+
+      onRegisterTextToolbarActionHandler(null);
+      onTextToolbarStateChange(INITIAL_TEXT_TOOLBAR_STATE);
     };
-  }, []);
+  }, [onRegisterTextToolbarActionHandler, onTextToolbarStateChange]);
 
   const updateMenuPosition = useCallback((id: number) => {
     const wrapper = wrapperRefs.current[id];
@@ -279,37 +907,6 @@ export default function Panel({
       window.removeEventListener('scroll', handleViewportChange, true);
     };
   }, [activeHoveredTextboxId, updateMenuPosition]);
-
-  const handleTextboxInput = (textbox: TextboxItem, nextText: string) => {
-    const element = textboxRefs.current[textbox.id];
-
-    if (!element) {
-      onTextboxChange(textbox.id, nextText);
-      return;
-    }
-
-    const previousHeight = element.offsetHeight || minTextboxHeight;
-    const lastValidValue =
-      lastValidTextboxValuesRef.current[textbox.id] ?? textbox.text;
-
-    measureTextboxHeight(element);
-
-    const nextSectionUsage = measureSectionUsage();
-
-    if (
-      (nextSectionUsage[textbox.section] ?? 0) >
-      getAvailableHeight(textbox.section)
-    ) {
-      element.value = lastValidValue;
-      measureTextboxHeight(element);
-      element.style.height = `${previousHeight}px`;
-      onOverflow();
-      return;
-    }
-
-    lastValidTextboxValuesRef.current[textbox.id] = nextText;
-    onTextboxChange(textbox.id, nextText);
-  };
 
   const handleDragStart = (id: number) => {
     setDraggedTextboxId(id);
@@ -421,6 +1018,67 @@ export default function Panel({
     }, 120);
   };
 
+  const handleTextboxFocus = (textboxId: number) => {
+    activeTextboxIdRef.current = textboxId;
+    updateTextToolbarStateFromSelection(textboxId);
+  };
+
+  const handleTextboxBlur = (textboxId: number) => {
+    window.requestAnimationFrame(() => {
+      const editor = textboxRefs.current[textboxId];
+
+      if (!editor) {
+        clearTextToolbarState();
+        return;
+      }
+
+      const selection = window.getSelection();
+
+      if (
+        document.activeElement === editor ||
+        isSelectionInsideEditor(editor, selection)
+      ) {
+        updateTextToolbarStateFromSelection(textboxId);
+        return;
+      }
+
+      if (activeTextboxIdRef.current === textboxId) {
+        clearTextToolbarState();
+      }
+    });
+  };
+
+  const handleTextboxInput = (textbox: TextboxItem) => {
+    commitTextboxContent(textbox);
+  };
+
+  const handleTextboxPaste = (
+    event: React.ClipboardEvent<HTMLDivElement>,
+    textbox: TextboxItem
+  ) => {
+    event.preventDefault();
+
+    const editor = textboxRefs.current[textbox.id];
+
+    if (!editor) {
+      return;
+    }
+
+    activeTextboxIdRef.current = textbox.id;
+    restoreSavedSelection(editor);
+
+    const plainText = normalizePlainText(
+      event.clipboardData.getData('text/plain') ?? ''
+    );
+
+    applyFragmentToCurrentSelection(
+      editor,
+      createFragmentFromPlainText(plainText),
+      'collapse-end'
+    );
+    commitTextboxContent(textbox);
+  };
+
   const sections = Array.from({ length: sectionCount }, (_, sectionIndex) =>
     textboxes.filter((textbox) => textbox.section === sectionIndex)
   );
@@ -496,17 +1154,24 @@ export default function Panel({
                           : ''
                       }`}
                     >
-                      <textarea
+                      <div
                         ref={(element) => {
                           textboxRefs.current[textbox.id] = element;
                         }}
-                        value={textbox.text}
-                        onChange={(event) =>
-                          handleTextboxInput(textbox, event.target.value)
-                        }
-                        placeholder={`Textbox ${index + 1}`}
-                        rows={1}
-                        className="w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out placeholder:text-slate-400 hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
+                        contentEditable
+                        suppressContentEditableWarning
+                        role="textbox"
+                        aria-multiline="true"
+                        spellCheck
+                        data-empty={textbox.text === '' ? 'true' : 'false'}
+                        data-placeholder={`Textbox ${index + 1}`}
+                        onFocus={() => handleTextboxFocus(textbox.id)}
+                        onBlur={() => handleTextboxBlur(textbox.id)}
+                        onInput={() => handleTextboxInput(textbox)}
+                        onPaste={(event) => handleTextboxPaste(event, textbox)}
+                        onKeyUp={() => updateTextToolbarStateFromSelection(textbox.id)}
+                        onMouseUp={() => updateTextToolbarStateFromSelection(textbox.id)}
+                        className="textbox-editor w-full resize-none overflow-hidden border border-slate-200/80 bg-white px-3 py-3 text-base leading-6 text-slate-900 outline-none transition-[border-color,box-shadow] duration-200 ease-out hover:border-slate-300 focus:border-sky-300 focus:shadow-[0_0_0_4px_rgba(125,211,252,0.18)]"
                       />
                     </div>
                   ))}

@@ -25,6 +25,28 @@ body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
+.textbox-editor {
+  min-height: 50px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.textbox-editor[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: rgb(148 163 184);
+  pointer-events: none;
+}
+
+.textbox-editor ol,
+.textbox-editor ul {
+  margin: 0.4rem 0;
+  padding-left: 1.4rem;
+}
+
+.textbox-editor li + li {
+  margin-top: 0.15rem;
+}
+
 ::selection {
   background: rgba(125, 211, 252, 0.32);
   color: inherit;

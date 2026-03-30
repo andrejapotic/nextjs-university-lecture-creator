@@ -5,6 +5,11 @@ import Navbar from '../components/Navbar';
 import Sidebar from '../components/Sidebar';
 import Panel from '../components/Panel';
 import LearningMetadataEditor from '../components/LearningMetadataEditor';
+import {
+  INITIAL_TEXT_TOOLBAR_STATE,
+  type TextToolbarAction,
+  type TextToolbarState,
+} from '../components/textEditorTypes';
 
 type LayoutOption = 'blank' | 'split' | 'thirds';
 type NodeType = 'object' | 'subobject' | 'section';
@@ -240,7 +245,13 @@ export default function Home() {
   const [objects, setObjects] = useState<LearningObjectItem[]>(INITIAL_OBJECTS);
   const [selectedNode, setSelectedNode] = useState<EditorSelection>(INITIAL_SELECTION);
   const [notification, setNotification] = useState<string | null>(null);
+  const [textToolbarState, setTextToolbarState] = useState<TextToolbarState>(
+    INITIAL_TEXT_TOOLBAR_STATE
+  );
   const objectsRef = useRef(objects);
+  const textToolbarActionHandlerRef = useRef<
+    ((action: TextToolbarAction) => void) | null
+  >(null);
   const nextIdRef = useRef(3);
   const nextObjectNumberRef = useRef(2);
   const nextSubobjectNumberRef = useRef(1);
@@ -788,6 +799,17 @@ export default function Home() {
     setNotification(OVERFLOW_MESSAGE);
   }, []);
 
+  const handleRegisterTextToolbarActionHandler = useCallback(
+    (handler: ((action: TextToolbarAction) => void) | null) => {
+      textToolbarActionHandlerRef.current = handler;
+    },
+    []
+  );
+
+  const handleTextToolbarAction = useCallback((action: TextToolbarAction) => {
+    textToolbarActionHandlerRef.current?.(action);
+  }, []);
+
   const updateMetadataNode = useCallback(
     (
       field: 'lectureTitle' | 'lectureLength' | 'lectureDescription',
@@ -820,6 +842,10 @@ export default function Home() {
         onAddSection={handleAddSection}
         onAddSubobject={handleAddSubobject}
         onAddTextbox={handleAddTextbox}
+        onTextToolbarAction={handleTextToolbarAction}
+        textToolbarState={
+          selectedSection ? textToolbarState : INITIAL_TEXT_TOOLBAR_STATE
+        }
       />
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar
@@ -854,6 +880,10 @@ export default function Home() {
               onSectionUsageChange={handleSectionUsageChange}
               onMoveTextbox={handleMoveTextbox}
               onOverflow={handleOverflow}
+              onRegisterTextToolbarActionHandler={
+                handleRegisterTextToolbarActionHandler
+              }
+              onTextToolbarStateChange={setTextToolbarState}
             />
           ) : selectedMetadataNode ? (
             <LearningMetadataEditor
