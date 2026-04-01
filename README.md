@@ -1,36 +1,46 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🎓 University Lecture Creator
 
-## Getting Started
+Fully functional university lecture editor used by professors to create and present lectures to 1000+ students.
 
-First, run the development server:
+## ✨Technologies
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- Next.js
+- Tailwind CSS 4
+- CodeMirror 6
+- KaTeX
+- MathLive
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 🚀Features
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Hierarchical lecture structure: object/sub-object/section to organize lectures into segments
+- Multiple layouts for sections to organize presentation elements
+- Rich text editor component enabling all of the needed text styling options
+- Image component that is resizable, movable and preserves quality
+- LaTeX component for math equations and formulas utilizing KaTeX and MathLive
+- Code Snippet component fitted for multiple language code presentation utilizing CodeMirror 6
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 📍The process
 
-## Learn More
+One of the biggest universities in Belgrade has used a proprietary lecture editor made with .NET Framework. I myself have worked and updated this editor many times.
 
-To learn more about Next.js, take a look at the following resources:
+This limited users of MAC devices, had trouble scaling and was overall starting to show age.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+I was tasked of developing a new web based solution that will enable the similar but enhanced workflow.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The result is software with orders of magnitude smoother experience, scalable to fit inovations in teaching and available on every operating system.
 
-## Deploy on Vercel
+*This is a showcase of the solution I developed. The final version containing XML lecture exporting and publishing is not allowed to be presented*
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🚦Running the project
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Clone the repository to your machine.
+2. Open the project folder in your terminal.
+3. Install dependencies with `npm install`.
+4. Start the app with `npm run dev`.
+
+## 🎬Preview
+<video src="https://github.com/user-attachments/assets/a9317409-23df-4485-9d84-ee4ff3852ae2.mp4" width="600" controls>
+  Your browser does not support the video tag.
+</video>
+
+## 🧪<a href="https://nextjs-university-lecture-creator.vercel.app/">Test it yourself!</a>
